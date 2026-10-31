@@ -62,7 +62,8 @@ export class MockDriver implements Driver {
               structuredOutput: res.structuredOutput,
               usage: {
                 ...res.usage,
-                actualCostUsd: res.usage.actualCostUsd * 0.5,
+                actualCostUsd:
+                  res.usage.actualCostUsd === null ? null : res.usage.actualCostUsd * 0.5,
               },
             });
           }

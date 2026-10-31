@@ -62,8 +62,8 @@ export interface FinishInvocationInput {
   readonly inputTokens?: number;
   readonly cachedInputTokens?: number;
   readonly outputTokens?: number;
-  readonly actualCostUsd?: number;
-  readonly equivalentCostUsd?: number;
+  readonly actualCostUsd?: number | null;
+  readonly equivalentCostUsd?: number | null;
   readonly output?: unknown;
   readonly errorText?: string;
 }
@@ -122,6 +122,22 @@ function areRulesSimilar(a: string, b: string): boolean {
   }
   const union = setA.size + setB.size - intersection;
   return union > 0 && intersection / union >= 0.7;
+}
+
+export function sumCosts(costs: readonly (number | null)[]): {
+  readonly usd: number;
+  readonly unpriced: number;
+} {
+  return {
+    usd: costs.reduce<number>((sum, cost) => sum + (cost ?? 0), 0),
+    unpriced: costs.filter((cost) => cost === null).length,
+  };
+}
+
+function formatCosts(costs: readonly (number | null)[]): string {
+  const { usd, unpriced } = sumCosts(costs);
+  if (costs.length > 0 && unpriced === costs.length) return '—';
+  return unpriced > 0 ? `$${usd.toFixed(4)} + unpriced` : `$${usd.toFixed(4)}`;
 }
 
 function formatCountdown(targetMs: number | null, nowMs: number): string {
@@ -347,8 +363,8 @@ export class HarnessStore {
         inputTokens: inTokens,
         cachedInputTokens: cacheTokens,
         outputTokens: outTokens,
-        actualCostUsd: input.actualCostUsd ?? 0,
-        equivalentCostUsd: input.equivalentCostUsd ?? 0,
+        actualCostUsd: input.actualCostUsd === undefined ? 0 : input.actualCostUsd,
+        equivalentCostUsd: input.equivalentCostUsd === undefined ? 0 : input.equivalentCostUsd,
         outputJson: input.output !== undefined ? JSON.stringify(input.output) : null,
         errorText: input.errorText ?? null,
       })
@@ -734,8 +750,8 @@ export class HarnessStore {
   public projectTelemetry(): void {
     const allRuns = this.listRuns();
     const allInvocations = this.listInvocations();
-    const totalActual = allInvocations.reduce((sum, i) => sum + i.actualCostUsd, 0);
-    const totalEquiv = allInvocations.reduce((sum, i) => sum + i.equivalentCostUsd, 0);
+    const totalActual = formatCosts(allInvocations.map((i) => i.actualCostUsd));
+    const totalEquiv = formatCosts(allInvocations.map((i) => i.equivalentCostUsd));
     const totalInput = allInvocations.reduce((sum, i) => sum + i.inputTokens, 0);
     const totalOutput = allInvocations.reduce((sum, i) => sum + i.outputTokens, 0);
 
@@ -748,12 +764,12 @@ export class HarnessStore {
               const inTok = rInvs.reduce((s, i) => s + i.inputTokens, 0);
               const cacheTok = rInvs.reduce((s, i) => s + i.cachedInputTokens, 0);
               const outTok = rInvs.reduce((s, i) => s + i.outputTokens, 0);
-              const actUsd = rInvs.reduce((s, i) => s + i.actualCostUsd, 0);
-              const eqUsd = rInvs.reduce((s, i) => s + i.equivalentCostUsd, 0);
+              const actUsd = formatCosts(rInvs.map((i) => i.actualCostUsd));
+              const eqUsd = formatCosts(rInvs.map((i) => i.equivalentCostUsd));
               const startIso = new Date(r.startedAtMs).toISOString();
               const endIso = r.finishedAtMs ? new Date(r.finishedAtMs).toISOString() : '—';
               const wallMs = r.finishedAtMs ? Math.max(0, r.finishedAtMs - r.startedAtMs) : 0;
-              return `| \`${r.id}\` | \`${r.flowName}\` | ${startIso} | ${endIso} | ${wallMs}ms | ${r.iteration + 1} | ${inTok}/${cacheTok}/${outTok} | $${actUsd.toFixed(4)} ($${eqUsd.toFixed(4)}) |`;
+              return `| \`${r.id}\` | \`${r.flowName}\` | ${startIso} | ${endIso} | ${wallMs}ms | ${r.iteration + 1} | ${inTok}/${cacheTok}/${outTok} | ${actUsd} (${eqUsd}) |`;
             })
             .join('\n') + '\n';
 
@@ -791,7 +807,7 @@ export class HarnessStore {
         : allInvocations
             .map((inv) => {
               const tok = `${inv.inputTokens}/${inv.cachedInputTokens}/${inv.outputTokens}`;
-              return `| \`${inv.runId}\` | ${inv.iteration} | \`${inv.stepName}\` | \`${inv.actorName}\` | \`${inv.accountId ?? inv.runnerId ?? '—'}\` | ${inv.durationMs ?? 0}ms | ${tok} | $${inv.actualCostUsd.toFixed(4)} ($${inv.equivalentCostUsd.toFixed(4)}) | \`${inv.status}\` |`;
+              return `| \`${inv.runId}\` | ${inv.iteration} | \`${inv.stepName}\` | \`${inv.actorName}\` | \`${inv.accountId ?? inv.runnerId ?? '—'}\` | ${inv.durationMs ?? 0}ms | ${tok} | ${formatCosts([inv.actualCostUsd])} (${formatCosts([inv.equivalentCostUsd])}) | \`${inv.status}\` |`;
             })
             .join('\n') + '\n';
 
@@ -800,8 +816,8 @@ export class HarnessStore {
       '',
       `- Total Input Tokens: ${totalInput}`,
       `- Total Output Tokens: ${totalOutput}`,
-      `- Total Actual API Cost: $${totalActual.toFixed(4)}`,
-      `- Total Subscription-Equivalent Value: $${totalEquiv.toFixed(4)}`,
+      `- Total Actual API Cost: ${totalActual}`,
+      `- Total Subscription-Equivalent Value: ${totalEquiv}`,
       '',
       '## Per-Run Breakdown',
       '| Run ID | Flow | Started | Finished | Duration | Iterations | Tokens (in/cache/out) | Cost (Actual / Equiv) |',

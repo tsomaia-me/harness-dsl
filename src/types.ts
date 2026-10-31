@@ -42,12 +42,19 @@ export interface QuotaPolicy {
   readonly defaultCooldownMs: number;
 }
 
-export interface TokenUsage {
+export interface TokenCounts {
   readonly inputTokens: number;
   readonly cachedInputTokens: number;
   readonly outputTokens: number;
-  readonly actualCostUsd: number;
-  readonly equivalentCostUsd: number;
+}
+
+export interface TokenUsage extends TokenCounts {
+  readonly actualCostUsd: number | null;
+  readonly equivalentCostUsd: number | null;
+}
+
+export interface PricingAdapter {
+  estimate(modelId: string, usage: TokenCounts, atMs: number): number | null;
 }
 
 export interface ExecutionContext {
@@ -76,6 +83,7 @@ export interface DriverInvokeRequest {
   readonly accountId: string;
   readonly modelId: string;
   readonly modelOptions: Record<string, unknown>;
+  readonly pricing?: PricingAdapter;
   readonly systemPrompt: string;
   readonly userPrompt: string;
   readonly outputJsonSchema: Record<string, unknown>;

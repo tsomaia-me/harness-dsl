@@ -17,7 +17,9 @@ import type {
   FlowContext,
   FlowMiddleware,
   HeadCapability,
+  PricingAdapter,
   Runner,
+  TokenUsage,
 } from './types.js';
 
 export function parseEnvFile(filePath: string): Record<string, string> {
@@ -37,15 +39,22 @@ export class ModelDef {
   public readonly accountProvider: AccountProvider;
   public readonly modelId: string;
   public readonly options: Record<string, unknown>;
+  public readonly pricingAdapter?: PricingAdapter;
 
   public constructor(
     accountProvider: AccountProvider,
     modelId: string,
     options: Record<string, unknown> = {},
+    pricingAdapter?: PricingAdapter,
   ) {
     this.accountProvider = accountProvider;
     this.modelId = modelId;
     this.options = options;
+    this.pricingAdapter = pricingAdapter;
+  }
+
+  public pricing(adapter: PricingAdapter): ModelDef {
+    return new ModelDef(this.accountProvider, this.modelId, this.options, adapter);
   }
 }
 
@@ -389,6 +398,7 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
           accountId: resolvedAccount.accountId,
           modelId: this.agent.modelDef.modelId,
           modelOptions: this.agent.modelDef.options,
+          pricing: this.agent.modelDef.pricingAdapter,
           systemPrompt,
           userPrompt: effectiveUserPrompt,
           outputJsonSchema,
@@ -505,13 +515,7 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
 class SchemaValidationError extends Error {
   public readonly driverResult: {
     readonly sessionId: string;
-    readonly usage: {
-      readonly inputTokens: number;
-      readonly cachedInputTokens: number;
-      readonly outputTokens: number;
-      readonly actualCostUsd: number;
-      readonly equivalentCostUsd: number;
-    };
+    readonly usage: TokenUsage;
   };
 
   public constructor(message: string, driverResult: any) {

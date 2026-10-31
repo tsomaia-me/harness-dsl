@@ -3,6 +3,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import { APICallError, generateText, jsonSchema, Output, RetryError } from 'ai';
+import { anthropicPricing, googlePricing, openaiPricing } from '../pricing/index.js';
 import { RateLimitedError } from '../quota.js';
 import { anthropicRateLimits, ietfRateLimits, openaiRateLimits } from '../rate-limits/index.js';
 import type {
@@ -12,10 +13,10 @@ import type {
   Driver,
   DriverInvokeRequest,
   DriverInvokeResult,
+  PricingAdapter,
   RateLimitAdapter,
   TokenUsage,
 } from '../types.js';
-import { estimateEquivalentUsd } from './claude-cli.js';
 
 export type SdkProviderName = 'anthropic' | 'google' | 'openai';
 
@@ -23,6 +24,12 @@ const DEFAULT_RATE_LIMITS: Readonly<Record<SdkProviderName, RateLimitAdapter>> =
   anthropic: anthropicRateLimits,
   google: ietfRateLimits,
   openai: openaiRateLimits,
+};
+
+const DEFAULT_PRICING: Readonly<Record<SdkProviderName, PricingAdapter>> = {
+  anthropic: anthropicPricing,
+  google: googlePricing,
+  openai: openaiPricing,
 };
 
 export interface AiSdkDriverOptions {
@@ -33,6 +40,7 @@ export interface AiSdkDriverOptions {
   readonly useCloudBatch?: boolean;
   readonly customFetch?: typeof fetch;
   readonly rateLimits?: RateLimitAdapter;
+  readonly pricing?: PricingAdapter;
 }
 
 export class AiSdkDriver implements Driver {
@@ -43,6 +51,7 @@ export class AiSdkDriver implements Driver {
   private readonly baseURL?: string;
   private readonly customFetch?: typeof fetch;
   private readonly rateLimits: RateLimitAdapter;
+  private readonly pricing: PricingAdapter;
   public readonly batch?: BatchAdapter;
 
   public constructor(opts: AiSdkDriverOptions) {
@@ -52,6 +61,7 @@ export class AiSdkDriver implements Driver {
     this.baseURL = opts.baseURL;
     this.customFetch = opts.customFetch;
     this.rateLimits = opts.rateLimits ?? DEFAULT_RATE_LIMITS[opts.provider];
+    this.pricing = opts.pricing ?? DEFAULT_PRICING[opts.provider];
 
     const enableBatch = opts.useCloudBatch ?? true;
     if (enableBatch && opts.provider === 'anthropic') {
@@ -158,7 +168,11 @@ export class AiSdkDriver implements Driver {
       const inputTokens = response.usage?.inputTokens ?? 0;
       const outputTokens = response.usage?.outputTokens ?? 0;
       const cachedInputTokens = (response.usage as any)?.cachedInputTokens ?? 0;
-      const cost = estimateEquivalentUsd(req.modelId, inputTokens, cachedInputTokens, outputTokens);
+      const cost = (req.pricing ?? this.pricing).estimate(
+        req.modelId,
+        { inputTokens, cachedInputTokens, outputTokens },
+        Date.now(),
+      );
 
       const rawHeaders = (response.response?.headers ?? {}) as Record<string, string | undefined>;
       const quotaHint = this.rateLimits.fromHeaders(rawHeaders, Date.now());
@@ -281,12 +295,14 @@ export class AiSdkDriver implements Driver {
             const inTok = Number(msg?.usage?.input_tokens ?? 0);
             const cacheTok = Number(msg?.usage?.cache_read_input_tokens ?? 0);
             const outTok = Number(msg?.usage?.output_tokens ?? 0);
-            const fullCost = estimateEquivalentUsd(
-              msg?.model ?? 'claude-sonnet-4-6',
-              inTok,
-              cacheTok,
-              outTok,
-            );
+            const fullCost =
+              typeof msg?.model === 'string'
+                ? this.pricing.estimate(
+                    msg.model,
+                    { inputTokens: inTok, cachedInputTokens: cacheTok, outputTokens: outTok },
+                    Date.now(),
+                  )
+                : null;
             return {
               customId: String(parsed.custom_id),
               ok: parsed.result?.type === 'succeeded',
@@ -299,7 +315,7 @@ export class AiSdkDriver implements Driver {
                 inputTokens: inTok,
                 cachedInputTokens: cacheTok,
                 outputTokens: outTok,
-                actualCostUsd: Number((fullCost * 0.5).toFixed(6)),
+                actualCostUsd: fullCost === null ? null : Number((fullCost * 0.5).toFixed(6)),
                 equivalentCostUsd: fullCost,
               },
             };

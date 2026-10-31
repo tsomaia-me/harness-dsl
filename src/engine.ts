@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import PQueue from 'p-queue';
 import { BoundAgentSkill, ConditionalExecutable, type FlowDef, type FlowNode } from './dsl.js';
-import type { HarnessStore } from './store.js';
+import { type HarnessStore, sumCosts } from './store.js';
 import type {
   AgentPlugin,
   BatchItemRequest,
@@ -488,8 +488,8 @@ export class FlowEngine {
             let totalIn = 0;
             let totalCache = 0;
             let totalOut = 0;
-            let totalActual = 0;
-            let totalEquiv = 0;
+            const actualCosts: (number | null)[] = [];
+            const equivalentCosts: (number | null)[] = [];
             const byId = new Map(polled.results.map((r) => [r.customId, r]));
             const outputs: TOut[] = [];
 
@@ -503,8 +503,8 @@ export class FlowEngine {
               totalIn += resItem.usage.inputTokens;
               totalCache += resItem.usage.cachedInputTokens;
               totalOut += resItem.usage.outputTokens;
-              totalActual += resItem.usage.actualCostUsd;
-              totalEquiv += resItem.usage.equivalentCostUsd;
+              actualCosts.push(resItem.usage.actualCostUsd);
+              equivalentCosts.push(resItem.usage.equivalentCostUsd);
               const parsedOut = executable.skill.outputSchema.parse(resItem.structuredOutput);
               if (executable.skill.assertFn) {
                 await executable.skill.assertFn(parsedOut, parsedInputs[idx]!);
@@ -517,8 +517,8 @@ export class FlowEngine {
               inputTokens: totalIn,
               cachedInputTokens: totalCache,
               outputTokens: totalOut,
-              actualCostUsd: totalActual,
-              equivalentCostUsd: totalEquiv,
+              actualCostUsd: actualCosts.includes(null) ? null : sumCosts(actualCosts).usd,
+              equivalentCostUsd: equivalentCosts.includes(null) ? null : sumCosts(equivalentCosts).usd,
               output: outputs,
             });
             return outputs;

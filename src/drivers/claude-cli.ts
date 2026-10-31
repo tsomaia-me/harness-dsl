@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { anthropicPricing } from '../pricing/anthropic.js';
 import { RateLimitedError } from '../quota.js';
 import {
   CLAUDE_CLI_RATE_LIMIT_TEXT,
@@ -42,29 +43,6 @@ export interface ClaudeCliDriverOptions {
   readonly env?: Record<string, string>;
   readonly spawnBridge?: ClaudeCliSpawnBridge;
   readonly probeQuota?: (accountId: string) => Promise<QuotaPatch>;
-}
-
-export function estimateEquivalentUsd(
-  modelId: string,
-  inputTokens: number,
-  cachedInputTokens: number,
-  outputTokens: number,
-): number {
-  const lower = modelId.toLowerCase();
-  let inRatePerM = 3.0;
-  let outRatePerM = 15.0;
-  if (lower.includes('opus')) {
-    inRatePerM = 15.0;
-    outRatePerM = 75.0;
-  } else if (lower.includes('haiku')) {
-    inRatePerM = 0.8;
-    outRatePerM = 4.0;
-  }
-  const uncachedIn = Math.max(0, inputTokens - cachedInputTokens);
-  const cachedCost = (cachedInputTokens / 1_000_000) * (inRatePerM * 0.1);
-  const inputCost = (uncachedIn / 1_000_000) * inRatePerM;
-  const outputCost = (outputTokens / 1_000_000) * outRatePerM;
-  return Number((inputCost + cachedCost + outputCost).toFixed(6));
 }
 
 function expandHome(filepath: string): string {
@@ -231,6 +209,7 @@ export class ClaudeCliDriver implements Driver {
     let structuredOutput: unknown = undefined;
     let rawText = '';
     let handoffTriggered = false;
+    let reportedCostUsd: number | null = null;
     let latestQuota: QuotaPatch = {};
     let rejectedUntilMs: number | null = null;
     let turnRateLimited = false;
@@ -266,6 +245,9 @@ export class ClaudeCliDriver implements Driver {
         }
 
         if (event.type === 'result') {
+          if (typeof event.total_cost_usd === 'number') {
+            reportedCostUsd = event.total_cost_usd;
+          }
           if (event.structured_output !== undefined) {
             structuredOutput = event.structured_output;
           } else if (typeof event.result === 'string') {
@@ -392,12 +374,13 @@ export class ClaudeCliDriver implements Driver {
         cachedInputTokens,
         outputTokens,
         actualCostUsd: 0,
-        equivalentCostUsd: estimateEquivalentUsd(
-          req.modelId,
-          inputTokens,
-          cachedInputTokens,
-          outputTokens,
-        ),
+        equivalentCostUsd:
+          reportedCostUsd ??
+          (req.pricing ?? anthropicPricing).estimate(
+            req.modelId,
+            { inputTokens, cachedInputTokens, outputTokens },
+            Date.now(),
+          ),
       };
 
       return {

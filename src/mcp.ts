@@ -9,7 +9,7 @@ import { z } from 'zod';
 import type { HeadDef } from './dsl.js';
 import { FlowEngine } from './engine.js';
 import { LocalRunner } from './runner.js';
-import type { HarnessStore } from './store.js';
+import { type HarnessStore, sumCosts } from './store.js';
 import type { AgentPlugin, Executable, ExecutionContext } from './types.js';
 
 export function readTranscriptContextTokens(transcriptPath: string): number {
@@ -505,11 +505,11 @@ export class HarnessMcpServer {
         },
         async ({ runId }) => {
           const list = this.store.listInvocations(runId);
-          const actualCostUsd = list.reduce((s, i) => s + i.actualCostUsd, 0);
-          const equivalentCostUsd = list.reduce((s, i) => s + i.equivalentCostUsd, 0);
+          const equivalent = sumCosts(list.map((i) => i.equivalentCostUsd));
           return this.formatMcpResult({
-            actualCostUsd,
-            equivalentCostUsd,
+            actualCostUsd: sumCosts(list.map((i) => i.actualCostUsd)).usd,
+            equivalentCostUsd: equivalent.usd,
+            unpricedInvocations: equivalent.unpriced,
             invocations: list,
           });
         },
@@ -524,6 +524,7 @@ export class HarnessMcpServer {
         async () => {
           const runs = this.store.listRuns().map((r) => {
             const invs = this.store.listInvocations(r.id);
+            const equivalent = sumCosts(invs.map((i) => i.equivalentCostUsd));
             return {
               runId: r.id,
               flowName: r.flowName,
@@ -533,8 +534,9 @@ export class HarnessMcpServer {
               inputTokens: invs.reduce((s, i) => s + i.inputTokens, 0),
               cachedInputTokens: invs.reduce((s, i) => s + i.cachedInputTokens, 0),
               outputTokens: invs.reduce((s, i) => s + i.outputTokens, 0),
-              actualCostUsd: invs.reduce((s, i) => s + i.actualCostUsd, 0),
-              equivalentCostUsd: invs.reduce((s, i) => s + i.equivalentCostUsd, 0),
+              actualCostUsd: sumCosts(invs.map((i) => i.actualCostUsd)).usd,
+              equivalentCostUsd: equivalent.usd,
+              unpricedInvocations: equivalent.unpriced,
             };
           });
           return this.formatMcpResult({ runs });

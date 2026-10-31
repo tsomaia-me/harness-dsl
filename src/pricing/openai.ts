@@ -1,0 +1,43 @@
+import { type PriceList, priceListPricing } from './table.js';
+
+export const OPENAI_PRICE_LIST: PriceList = {
+  source: 'https://developers.openai.com/api/docs/pricing',
+  asOf: '2026-10-31',
+  prices: [
+    { model: 'gpt-6-astra', inputPerMTok: 10, cachedInputPerMTok: 1, outputPerMTok: 50 },
+    { model: 'gpt-6.1-sol', inputPerMTok: 2, cachedInputPerMTok: 0.1, outputPerMTok: 10 },
+    { model: 'gpt-6.1-terra', inputPerMTok: 1, cachedInputPerMTok: 0.05, outputPerMTok: 5 },
+    { model: 'gpt-6-luna', inputPerMTok: 0.1, cachedInputPerMTok: 0.01, outputPerMTok: 0.5 },
+    { model: 'gpt-6-sol', inputPerMTok: 2, cachedInputPerMTok: 0.2, outputPerMTok: 10 },
+    { model: 'gpt-5.6-sol', inputPerMTok: 4, cachedInputPerMTok: 0.4, outputPerMTok: 20 },
+    { model: 'gpt-5.6-terra', inputPerMTok: 2, cachedInputPerMTok: 0.2, outputPerMTok: 12 },
+    { model: 'gpt-5.6-luna', inputPerMTok: 0.2, cachedInputPerMTok: 0.02, outputPerMTok: 1.2 },
+    { model: 'gpt-5.5', inputPerMTok: 5, cachedInputPerMTok: 0.5, outputPerMTok: 30 },
+    { model: 'gpt-5.5-pro', inputPerMTok: 30, outputPerMTok: 180 },
+    { model: 'gpt-5.4', inputPerMTok: 2.5, cachedInputPerMTok: 0.25, outputPerMTok: 15 },
+    { model: 'gpt-5.4-pro', inputPerMTok: 30, outputPerMTok: 180 },
+    { model: 'gpt-5.4-mini', inputPerMTok: 0.75, cachedInputPerMTok: 0.075, outputPerMTok: 4.5 },
+    { model: 'gpt-5.4-nano', inputPerMTok: 0.2, cachedInputPerMTok: 0.02, outputPerMTok: 1.25 },
+    { model: 'gpt-5.2', inputPerMTok: 1.75, cachedInputPerMTok: 0.175, outputPerMTok: 14 },
+    { model: 'gpt-5.2-pro', inputPerMTok: 21, outputPerMTok: 168 },
+    { model: 'gpt-5.1', inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10 },
+    { model: 'gpt-5', inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10 },
+    { model: 'gpt-5-mini', inputPerMTok: 0.25, cachedInputPerMTok: 0.025, outputPerMTok: 2 },
+    { model: 'gpt-5-nano', inputPerMTok: 0.05, cachedInputPerMTok: 0.005, outputPerMTok: 0.4 },
+    { model: 'gpt-5-pro', inputPerMTok: 15, outputPerMTok: 120 },
+    { model: 'gpt-4.1', inputPerMTok: 2, cachedInputPerMTok: 0.5, outputPerMTok: 8 },
+    { model: 'gpt-4.1-mini', inputPerMTok: 0.4, cachedInputPerMTok: 0.1, outputPerMTok: 1.6 },
+    { model: 'gpt-4.1-nano', inputPerMTok: 0.1, cachedInputPerMTok: 0.025, outputPerMTok: 0.4 },
+    { model: 'gpt-4o', inputPerMTok: 2.5, cachedInputPerMTok: 1.25, outputPerMTok: 10 },
+    { model: 'gpt-4o-2024-05-13', inputPerMTok: 5, outputPerMTok: 15 },
+    { model: 'gpt-4o-mini', inputPerMTok: 0.15, cachedInputPerMTok: 0.075, outputPerMTok: 0.6 },
+    { model: 'o1', inputPerMTok: 15, cachedInputPerMTok: 7.5, outputPerMTok: 60 },
+    { model: 'o1-pro', inputPerMTok: 150, outputPerMTok: 600 },
+    { model: 'o3', inputPerMTok: 2, cachedInputPerMTok: 0.5, outputPerMTok: 8 },
+    { model: 'o3-pro', inputPerMTok: 20, outputPerMTok: 80 },
+    { model: 'o3-mini', inputPerMTok: 1.1, cachedInputPerMTok: 0.55, outputPerMTok: 4.4 },
+    { model: 'o4-mini', inputPerMTok: 1.1, cachedInputPerMTok: 0.275, outputPerMTok: 4.4 },
+  ],
+};
+
+export const openaiPricing = priceListPricing(OPENAI_PRICE_LIST);

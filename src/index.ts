@@ -43,6 +43,18 @@ export {
   RateLimitedError,
 } from './quota.js';
 export {
+  ANTHROPIC_PRICE_LIST,
+  anthropicPricing,
+  GOOGLE_PRICE_LIST,
+  googlePricing,
+  type ModelPrice,
+  OPENAI_PRICE_LIST,
+  openaiPricing,
+  type PriceList,
+  priceListPricing,
+  type TokenRates,
+} from './pricing/index.js';
+export {
   anthropicRateLimits,
   composeRateLimits,
   ietfRateLimits,
@@ -83,6 +95,7 @@ export type {
   FlowMiddleware,
   HeadCapability,
   LessonEntry,
+  PricingAdapter,
   QuotaPatch,
   QuotaPolicy,
   QuotaWindow,
@@ -90,5 +103,6 @@ export type {
   RateLimitAdapter,
   ResolvedAccount,
   Runner,
+  TokenCounts,
   TokenUsage,
 } from './types.js';
