@@ -18,11 +18,12 @@
 
 Both `H.account` and `H.pool` implement the `AccountProvider` interface (Composite pattern). Anywhere an `AccountProvider` is accepted (such as `H.model`), either a single `H.account` or an `H.pool` may be passed.
 
-- **Reactive Quota & Reset Discovery:** Accounts do not require hardcoded reset schedules. Each account tracks the quota windows its provider reports, by id (`anthropic:5h` and `anthropic:7d` for Claude subscriptions, `openai:requests` / `openai:tokens`, `anthropic:requests`, `http:ratelimit`, ...), each with a utilization ratio and an exact `resetsAt`. Drivers extract them reactively from response headers (through a `RateLimitAdapter`), the Claude CLI's stream-json rate-limit events, quota probes and `429` responses. If a provider grants an early or bonus reset, the next probe detects the drop in utilization and returns the account to active rotation immediately.
+- **Reactive Quota & Reset Discovery:** Accounts do not require hardcoded reset schedules. Each account tracks the quota windows its provider reports, by id (`anthropic:5h` and `anthropic:7d` for Claude subscriptions, `openai:requests` / `openai:tokens`, `anthropic:requests`, `http:ratelimit`, ...), each with a utilization ratio and an exact `resetsAt`. Drivers extract them reactively from response headers (through a `RateLimitAdapter`), the Claude CLI's stream-json rate-limit events, quota probes and `429` responses. If a provider grants an early or bonus reset, the next run's report or probe that shows the share window's utilization dropping (or its reset moving later) frees the project share and returns the account to rotation immediately. A window reported without a reset time stops blocking once it goes stale.
+- **Reserve (`.reserve({ minFreeAccounts, maxBurstUtilization })`):** Keeps the `minFreeAccounts` least-used eligible accounts below `maxBurstUtilization` untouched. The pool uses its other eligible accounts first, then the fallback, and a reserved account only when neither is available.
 - **Quota Policy (`.quotaPolicy({...})`):** Per-window thresholds, the probe staleness, the token budget that turns token use into project share, the window whose reset frees the share, and the default cooldown come from a `QuotaPolicy`: core defaults, overridden by the driver (the Claude CLI driver supplies the subscription values) and then by `H.account(...).quotaPolicy({...})`.
 - **Per-Account and Per-Pool Quota Shares (`.maxQuotaShare(ratio)`):**
   - Declared on an individual `H.account`, `.maxQuotaShare(0.75)` caps this project's consumption of that specific account at 75% of its window.
-  - Declared on an `H.pool`, `.maxQuotaShare(0.60)` sets the default cap for accounts in the pool (individual account caps override or tighten the pool cap).
+  - Declared on an `H.pool`, `.maxQuotaShare(0.60)` sets the default cap for accounts in the pool (an individual account cap can only tighten the pool cap).
 
 ```typescript
 import { H, z } from 'harness-dsl';
@@ -56,7 +57,7 @@ export const Gemini = H.model(
 
 Custom drivers are supported via `H.drivers.custom({ invoke, probeQuota?, batch? })`, allowing any CLI binary or HTTP API to back an `H.model`. `H.drivers.aiSdk({ provider })` also accepts a `ProviderPreset` (`{ name, createModel, apiKeyEnv?, mapModelOptions?, rateLimits?, pricing?, createBatch? }`), so any Vercel AI SDK model (Bedrock, Mistral, OpenRouter, Ollama) runs without core changes.
 
-Token costs come from a `PricingAdapter`: dated first-party price lists for Anthropic, OpenAI and Google, and the cost the Claude CLI itself reports. `H.model(...).pricing(adapter)` overrides it per model. A model no price list knows is recorded as unpriced, never billed at a guessed rate.
+Token costs come from a `PricingAdapter`: dated first-party price lists for Anthropic, OpenAI and Google, and the cost the Claude CLI itself reports. `H.model(...).pricing(adapter)` overrides it per model, on every path including batch, and takes precedence over a provider-reported cost. A model no price list knows is recorded as unpriced, never billed at a guessed rate.
 
 ### §1.3 Runners (`H.runner`)
 
@@ -142,11 +143,13 @@ export const Builder = H.agent('builder')
   .promptFile('.harness/prompts/builder.md')
   .tools(['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob', 'LSP'])
   .tool('explore_repo', RepoExplorer.run(ExploreSkill)) // Composable agent-as-tool
-  .use(stopCommandHook(TouchedChecks))                  // Opt-in plugin hook
+  .use(stopCommandHook(TouchedChecks, {                  // Opt-in plugin hook
+    mapInput: ({ workDir }) => ({ worktreePath: workDir }),
+  }))
   .use(fileLeaseGuard());                               // Opt-in file scope lock
 ```
 
-- **Automatic Context Handoff:** If a multi-turn CLI agent approaches `maxContextTokens` (at `maxContextTokens - handoffBuffer`, where `.handoffBuffer(tokens)` defaults to `30_000`), the driver injects a handoff turn instructing the agent to commit its progress and output a structured state summary, then transparently spawns a fresh successor session on the same worktree to finish the remaining criteria.
+- **Automatic Context Handoff:** If a multi-turn CLI agent approaches `maxContextTokens` (at `maxContextTokens - handoffBuffer`, where `.handoffBuffer(tokens)` defaults to `30_000`; more than `.maxHandoffs(n)` consecutive handoffs, default 3, fail the step), the driver injects a handoff turn instructing the agent to commit its progress and output a structured state summary, then transparently spawns a fresh successor session on the same worktree to finish the remaining criteria.
 
 ### §1.7 Flows & Combinators (`H.flow`)
 
@@ -201,7 +204,7 @@ export const Head = H.head()
   - `.claude/skills/head/SKILL.md` instructs `Head` to call `harness_ground()` as its first step.
   - `harness_ground()` registers `Head`'s session, returns live queue/blocker/account state, any note from the prior `Head`, and `head`-scoped lessons.
   - A `PostToolUse` hook on `mcp__harness__*` reads `Head`'s `transcript_path` token usage on every MCP tool call. When usage crosses `contextNoticeThreshold`, the MCP response instructs `Head` to call `harness_handoff({ note })` and compact or rotate.
-  - Hook callbacks from agents and `Head` go through a `HookProtocol` that builds the agent's hook settings, parses callbacks into neutral tool events and formats the answers. `claude-code` is the default; `.hookProtocol(protocol)` adds another agent CLI's protocol, and `.transcriptReader(fn)` sets how the Head's transcript is measured.
+  - Hook callbacks from agents and `Head` go through a `HookProtocol` that builds the agent's hook settings, parses callbacks into neutral tool events, formats the answers and measures transcripts. Each driver brings its agents' protocol (`claude-code` for the Claude CLI), and each invocation registers its plugins with the orchestrator, so batch items and parallel agents keep their own guards. An agent with plugins refuses to run where hooks cannot be delivered. `.headProtocol(protocol)` sets the protocol the Head's own client speaks (default `claude-code`); the Head's MCP config (`.mcp.json`) and its `PostToolUse` hook currently assume Claude Code.
 
 ---
 

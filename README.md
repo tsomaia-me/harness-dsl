@@ -142,7 +142,7 @@ const orchestrator = await startOrchestrator({
 ### 1. Accounts, Pools & Models
 
 - **`H.drivers.claudeCli(opts)`**: Spawns `claude -p --output-format stream-json --json-schema` with isolated `configDir` (`CLAUDE_CONFIG_DIR`) or `CLAUDE_CODE_OAUTH_TOKEN`, automatic `--resume` on schema validation retry, 1-turn context-ceiling handoff extraction when `maxContextTokens - handoffBuffer` is reached, live 5h/7d windows from the CLI's `rate_limit_event`, and the CLI-reported cost as the subscription-equivalent value.
-- **`H.drivers.aiSdk(opts)`**: Calls any Vercel AI SDK model with structured output (`Output.object`). `provider` is `'anthropic' | 'openai' | 'google'` or your own `ProviderPreset` (`{ name, createModel, apiKeyEnv?, mapModelOptions?, rateLimits?, pricing?, createBatch? }`). First-party presets map `cachePrefix`, `effort` and `thinkingBudget`, parse their provider's rate-limit headers, and price tokens from dated price lists. Anthropic Cloud Batch is on by default; `batch: false` turns it off, and `anthropicBatchAdapter({ ... })` configures `maxTokens`, `apiVersion`, `discount` and `structuredOutput`.
+- **`H.drivers.aiSdk(opts)`**: Calls any Vercel AI SDK model with structured output (`Output.object`). `provider` is `'anthropic' | 'openai' | 'google'` or your own `ProviderPreset` (`{ name, createModel, apiKeyEnv?, mapModelOptions?, rateLimits?, pricing?, createBatch? }`); `fetch`, `rateLimits` and `pricing` options override the preset. First-party presets map `cachePrefix`, `effort` and `thinkingBudget`, parse their provider's rate-limit headers, and price tokens from dated price lists. Anthropic Cloud Batch is on by default; `batch: false` turns it off, and `anthropicBatchAdapter({ ... })` configures `maxTokens`, `apiVersion`, `discount` and `structuredOutput`.
 - **`H.drivers.custom(opts)` / `H.drivers.mock(opts)`**: Custom or deterministic test drivers.
 - **`H.account(id, driver).maxQuotaShare(0..1)`**: Wraps a driver with a per-account quota ceiling.
 - **`H.account(id, driver).quotaPolicy({ thresholds?, defaultThreshold?, probeStalenessMs?, tokenBudget?, shareResetWindowId?, defaultCooldownMs? })`**: Overrides the driver's quota policy. Without a `tokenBudget`, project share is not derived from token use.
@@ -172,11 +172,11 @@ const orchestrator = await startOrchestrator({
   - `.maxRetries(n)`
 - **`H.agent(name)`**:
   - `.model(modelDef)`
-  - `.maxContextTokens(n)` / `.handoffBuffer(tokens)` (default 30_000) / `.inactivityTimeoutMs(ms)`
+  - `.maxContextTokens(n)` / `.handoffBuffer(tokens)` (default 30_000) / `.maxHandoffs(n)` (default 3) / `.inactivityTimeoutMs(ms)`
   - `.prompt(text)` / `.promptFile(filePath)`
   - `.tools(['Read', 'Edit', ...])` — Built-in tool allowlist.
   - `.tool(name, executable)` — Attaches any `Executable` (command, agent skill, or flow) as an MCP tool callable by the agent.
-  - `.use(plugin)` — Attaches hook plugins (`preTool: { intents, handle }` / `stop: { handle }`), delivered through the driver's `HookProtocol`.
+  - `.use(plugin)` — Attaches hook plugins (`preTool: { intents, handle }` / `stop: { handle }`), delivered through the driver's `HookProtocol`. Each invocation registers its plugins with the orchestrator; an agent with plugins refuses to run on a driver without a hook protocol or outside `startOrchestrator`.
   - `.run(skillDef, inputMapper?)` — Produces a `BoundAgentSkill` (`Executable<TInput, TOutput>`).
 
 ### 4. Flow Combinators (`H.flow(name)`)
@@ -201,7 +201,7 @@ const orchestrator = await startOrchestrator({
 | :--- | :--- | :--- |
 | `gitWorktreeIsolation({ baseBranch?, worktreesDir?, cleanupOnSuccess? })` | Flow (`.use()`) | Creates an isolated git worktree (`harness/<runId>`) per flow run and removes it on completion. |
 | `fileLeaseGuard()` | Agent (`.use()`) | Subscribes to `file-write` tool events (Claude Code: `Edit`, `Write`, `MultiEdit`) and blocks writes to files leased by another active run. |
-| `stopCommandHook(commandDef, { mapInput?, verdict? })` | Agent (`.use()`) | Runs a verification `CommandDef` when an agent attempts to stop and blocks completion with its `summary` if `passed === false`. A command with another output shape passes `verdict(output) => ({ allow, reason })`. |
+| `stopCommandHook(commandDef, { mapInput?, verdict? })` | Agent (`.use()`) | Runs a verification `CommandDef` with `{ workDir }` when an agent attempts to stop and blocks completion with its `summary` if `passed === false`. A command with another input needs `mapInput`, and one with another output needs `verdict(output) => ({ allow, reason })`; both are enforced by the types. |
 
 ---
 
@@ -230,6 +230,8 @@ When `startOrchestrator({ projectDir, head })` starts, it writes `.mcp.json` in 
 - **`accounts:manage`:** `account_status`, `account_set_share`
 - **`telemetry:read`:** `telemetry_summary`, `telemetry_runs`
 - **`runner:exec`:** `runner_exec`
+
+The same server is every run's hook receiver: agent hooks post to `/internal/hook?invocation=<id>`. `H.head().headProtocol(protocol)` sets how the Head's own client reports tool events and transcripts (default Claude Code), and `.contextNoticeThreshold(tokens)` sets when the Head is told to call `harness_handoff`. `.mcp.json` and the Head's `PostToolUse` hook currently assume Claude Code.
 
 ---
 

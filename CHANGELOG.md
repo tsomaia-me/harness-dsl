@@ -2,42 +2,114 @@
 
 ## 0.3.0
 
-The core no longer names a provider, CLI, model, header, price, hook format, transcript format, port name or input field. Each lives behind an adapter with a first-party default, and `test/unit/core-boundary.test.ts` enforces the boundary.
+The core no longer names a provider, CLI, model, header, price, hook format, transcript format, port name or input field. Each lives behind an adapter with a first-party default. `test/unit/core-boundary.test.ts` enforces the boundary over the transitive imports of every core file. One known exception remains until 0.4.0: the Head's `.mcp.json` is Claude Code's format.
 
 ### Added
 
-- Quota windows: `QuotaWindow { id, utilization, resetsAtMs }` per account, `QuotaPolicy` with per-window thresholds, and `H.account(...).quotaPolicy({...})`.
-- `RateLimitAdapter` with `anthropicRateLimits`, `openaiRateLimits`, `ietfRateLimits` and `composeRateLimits`. `AiSdkDriverOptions.rateLimits` overrides the preset's adapter.
-- The Claude CLI driver reports live `anthropic:5h` / `anthropic:7d` windows from the stream-json `rate_limit_event`.
-- `PricingAdapter` with dated price lists for Anthropic, OpenAI and Google (`anthropicPricing`, `openaiPricing`, `googlePricing`, `priceListPricing`), long-context tiers, scheduled price changes, and `H.model(...).pricing(adapter)`. The Claude CLI driver records the CLI's own `total_cost_usd`.
-- `ProviderPreset` (`anthropicPreset`, `openaiPreset`, `googlePreset`); `H.drivers.aiSdk({ provider })` accepts a user preset for any AI SDK model.
-- `anthropicBatchAdapter({ maxTokens, apiVersion, baseURL, discount, structuredOutput })`.
-- `HookProtocol` (`claudeCodeHookProtocol`), `ToolEvent`, `H.head().hookProtocol(p)` and `H.head().transcriptReader(fn)`.
-- `agent.handoffBuffer(tokens)`, `H.flow(...).identify({ ticketId, touchedPaths })`, and `LocalRunnerOptions.portsPerSlot` / `slotEnv`.
-- `stopCommandHook(command, { mapInput, verdict })`.
+- **Quota model:** quota windows (`QuotaWindow { id, utilization, resetsAtMs }`) per account. A `QuotaPolicy` sets per-window thresholds, probe staleness, token budget, share-reset window and default cooldown. `H.account(...).quotaPolicy({...})` and `Driver.quotaPolicy` set it, and `CLAUDE_SUBSCRIPTION_QUOTA_POLICY` is the Claude CLI default. `ANTHROPIC_5H_WINDOW` / `ANTHROPIC_7D_WINDOW` name the subscription windows.
+- **Rate limits:** `RateLimitAdapter.fromResponse({ status, headers, body })`, with `anthropicRateLimits`, `openaiRateLimits`, `googleRateLimits` (Gemini `RetryInfo` in the 429 body), `ietfRateLimits` and `composeRateLimits`. Header helpers are exported for custom adapters. The Claude CLI driver reports live `anthropic:5h` / `anthropic:7d` windows from its stream-json `rate_limit_event`.
+- **Pricing:** `PricingAdapter`, with dated price lists for Anthropic, OpenAI and Google (`anthropicPricing`, `openaiPricing`, `googlePricing`, `priceListPricing`). Lists support cache-read and cache-write rates, long-context tiers and scheduled price changes. `H.model(...).pricing(adapter)` overrides pricing on every path. `TokenCounts.cacheWriteTokens` is new, and `inputTokens` is defined to include cache reads and writes.
+- **Provider presets:** `ProviderPreset` (`anthropicPreset`, `openaiPreset`, `googlePreset`). `H.drivers.aiSdk({ provider })` accepts a user preset for any AI SDK model.
+- **Batch:** `anthropicBatchAdapter({ apiKey, pricing, baseURL?, fetch?, maxTokens?, apiVersion?, discount?, structuredOutput? })`. `apiKey` (a function) and `pricing` are required when you build one yourself; the Anthropic preset supplies both.
+- **Hooks:**
+  - `HookProtocol` (`claudeCodeHookProtocol`) parses tool events, formats decisions and measures transcripts.
+  - `ToolEvent` carries the tool name and raw payload.
+  - Each invocation registers its plugins with the run's `HookReceiver`, which is the orchestrator's MCP server.
+  - `Driver.hookProtocol` and `H.head().headProtocol(p)` are new.
+- **Agents and flows:** `agent.handoffBuffer(tokens)`, `agent.maxHandoffs(n)` with `HandoffLimitError`, and `H.flow(...).identify({ ticketId, touchedPaths })`.
+- **Runner:** `LocalRunnerOptions.portsPerSlot` / `slotEnv`.
+- **Stop hook:** `stopCommandHook(command, { mapInput, verdict })`, with options typed from the command.
+- **Custom drivers:** they take `quotaPolicy` and `hookProtocol`, and should honour `DriverInvokeRequest.pricing`, `handoffBufferTokens` and `invocationId`.
 
 ### Fixed
 
-- A successful Claude CLI run whose output mentioned "rate limit" was treated as rate limited and cooled its account down. "Not logged in" is no longer treated as a rate limit.
-- AI SDK 429s arrive wrapped in `RetryError`; their rate-limit headers were never read.
+**Rate limits**
+- A successful Claude CLI run whose output mentioned "rate limit" was treated as rate limited. Errors naming `rate_limiter` / `ratelimit.ts` were too. "Not logged in" is no longer a rate limit.
+- AI SDK 429s arrive wrapped in `RetryError`, and their rate-limit headers were never read.
+- A rate limit whose cooldown was already over (`Retry-After: 0`, a past reset) made the skill loop retry forever.
+
+**Quota**
 - A busy account was never re-probed, because every acquire reset the probe staleness clock.
+- A run's report of a share-window reset (lower utilization, or a later reset time) never freed the project share; only a probe could, and the Claude CLI has none.
+- A window recorded with high utilization and no reset time blocked its account forever.
+- The same account under two policies was charged against the wrong token budget.
+- `nextAvailableAtMs` could be earlier than the active cooldown.
+- The reserve rule sent work to the paid fallback while non-reserved accounts were eligible.
 - A share-window reset left `windowTokensUsed` in place.
-- An existing `runtime.db` from another schema version kept its old columns. It is now backed up to `runtime.db.v<n>.bak` and recreated.
-- Anthropic batch requests forced `tool_choice`, which Opus 5.5, Sonnet 5.5 and Fable 5.1 reject. They now use `output_config.format`, carry the model's `effort`, and default to 16000 max tokens instead of 4096.
-- Costs were estimated from `opus` / `haiku` substrings at retired prices, and every other model, OpenAI and Gemini included, was billed at Sonnet rates. Unknown models are now recorded as unpriced.
+
+**Hooks and plugins**
 - When no plugin objected, the hook answered `{ decision: 'approve' }`, which Claude Code reads on `PreToolUse` as an allow that skips its permission check. It now answers `{}`.
-- `stopCommandHook` allowed a stop when the command's output had neither `passed` nor `exitCode`.
+- A throwing plugin handler left the hook call without an answer, so the guard failed open. The error now blocks.
+- Agents inside `.batch()` never got their hook plugins, and parallel agents answered each other's hooks.
+- An agent with plugins on a driver without hook support, or outside an orchestrator, ran unguarded. It now throws.
+- The Head's context notice and `harness_ground` measured the transcript differently. The transcript reader also returned 0 when the last line was over 64 KiB.
+- `stopCommandHook` allowed a stop when the output had neither `passed` nor `exitCode`, and guessed `worktreePath` as the command input.
+
+**Handoffs**
+- The Claude CLI driver checked the context ceiling against the result event's cumulative usage, which started spurious handoffs.
+- A task that hit the context ceiling every session handed off forever.
+- The driver's handoff buffer defaulted to 0 while the DSL's defaulted to 30_000.
+
+**Costs and batch**
+- Costs were estimated from `opus` / `haiku` substrings at retired prices, and every other model was billed at Sonnet rates. Unknown models are now recorded as unpriced.
+- Batch costs under-reported by up to 11× (exclusive input tokens, dropped cache writes) and ignored pricing overrides. The CLI-reported cost also beat an explicit model override.
+- Anthropic batch requests forced `tool_choice`, which Opus 5.5, Sonnet 5.5 and Fable 5.1 reject. They now use `output_config.format`, carry the model's `effort`, and default to 16000 max tokens.
+- A cloud batch with one failed item left its invocation `running` and never recorded the paid tokens.
+
+**Other**
+- SSH runner env values with spaces or shell metacharacters broke the remote command.
+- An existing `runtime.db` from another schema version kept its old columns.
+- `.input()` after `.identify()` kept callbacks typed on the old input.
+- User price-list entries with capitals never matched.
 
 ### Breaking
 
-- `QuotaSnapshot` is replaced by `QuotaPatch` / `QuotaWindow` / `QuotaPolicy`. `Driver.probeQuota` and `DriverInvokeResult.quotaHint` return `QuotaPatch`. `ResolvedAccount` carries `quotaPolicy`. `recordAccountTokenUsage` takes no budget argument.
+**Quota and store**
+- `QuotaSnapshot` is replaced by `QuotaPatch` / `QuotaWindow` / `QuotaPolicy`.
+- `Driver.probeQuota` and `DriverInvokeResult.quotaHint` return `QuotaPatch`, and `ResolvedAccount` carries `quotaPolicy`.
+- `HarnessStore.getAccountQuota` / `listAccountQuotas` return `AccountQuotaState`: `windows` replaces the 5h/7d fields and `updatedAtMs`.
+- `upsertAccountQuota` takes `AccountQuotaPatch`.
+- `recordAccountTokenUsage(accountId, tokens, tokenBudget)` takes the budget, `registerQuotaPolicy` is removed, and `finishInvocation` no longer charges quota.
+- The `account_status` and `harness_ground` MCP payloads change shape accordingly.
 - An account without a `tokenBudget` no longer derives project share from tokens. The Claude CLI driver keeps 5,000,000.
-- `parseRateLimitHeaders`, `parseRateLimitResetFromMessage` and `estimateEquivalentUsd` are removed. Drivers throw `RateLimitedError` instead of errors carrying `cooldownUntilMs`.
+- `.quotaPolicy()` replaces an earlier override instead of merging.
+
+**Rate limits and pricing**
+- `parseRateLimitHeaders` is removed. `RateLimitAdapter.fromHeaders` is now `fromResponse`.
+- Drivers throw `RateLimitedError` instead of errors carrying `cooldownUntilMs`.
 - `TokenUsage.actualCostUsd` / `equivalentCostUsd` and the invocation cost columns are `number | null`.
-- `AiSdkDriverOptions.useCloudBatch` is replaced by `batch?: BatchAdapter | false`, and `AiSdkDriver.provider` by `preset`. `Driver.kind` is an open string.
-- `AgentPlugin` `hookTypes` / `onPreToolUse` / `onStop` are replaced by `preTool` / `stop` handlers taking a `ToolEvent`. `DriverInvokeRequest.hookTypes` is replaced by `hookSubscriptions`. The hook URL carries `protocol=` instead of `event=`. `readTranscriptContextTokens` is now `readClaudeCodeTranscriptTokens`.
-- `ExecutionContext.slotIndex` / `slotPorts` are removed; commands read them from `exec()`. The default slot env no longer sets `PORT_API` / `PORT_WEB` / `PORT_ADMIN`.
+- `BatchAdapter.submit` takes an optional pricing argument, and `ProviderPreset.createBatch` receives pricing.
+
+**AI SDK driver**
+- `AiSdkDriverOptions.useCloudBatch` is replaced by `batch?: BatchAdapter | false`, and `customFetch` by `fetch`.
+- `AiSdkDriver.provider` is replaced by `preset`.
+- `Driver.kind` is an open string.
+
+**Hooks and plugins**
+- `AgentPlugin` `hookTypes` / `onPreToolUse` / `onStop` are replaced by `preTool` / `stop` handlers taking a `ToolEvent`.
+- Agents can no longer subscribe to `PostToolUse`; it had no handler in 0.2.0.
+- `DriverInvokeRequest.hookTypes` is replaced by `hookSubscriptions` plus `invocationId`.
+- `ClaudeCliDriver.buildHookSettingsJson` is removed.
+- `ExecutionContext.hookServerUrl` and `FlowRunOptions.hookServerUrl` / `onActivePluginsChange` are replaced by `hookReceiver`.
+- `HarnessMcpServer.registerRunPlugins` / `unregisterRunPlugins` are replaced by `register` / `unregister(invocationId, registration)`, and `handleHookCallback` takes `(invocationId, payload)`.
+- The hook URL carries `?invocation=` instead of `event=` / `runId=`, and the event comes from the payload.
+- `readTranscriptContextTokens` is now `readClaudeCodeTranscriptTokens`, and `HookProtocol.readContextTokens` is required.
+- `H.head().transcriptReader()` is replaced by `.headProtocol()`.
+- Agents with plugins now throw on a driver without `hookProtocol` or in a run without a hook receiver.
+
+**Stop hook**
+- `stopCommandHook`'s second argument is an options object typed from the command.
+- Its default input is `{ workDir }`.
+- An output with `exitCode` but no `passed` needs a `verdict`, and the block reason no longer falls back to `stderr` or the output's JSON.
+
+**Engine and runner**
+- `ExecutionContext.slotIndex` / `slotPorts` are removed; commands read them from `exec()`.
+- The default slot env no longer sets `PORT_API` / `PORT_WEB` / `PORT_ADMIN`.
 - The flow engine no longer reads `input.id` / `input.touches`; use `.identify()`.
-- `stopCommandHook`'s second argument is an options object. `ticket_write` has no `touches` argument.
-- `runtime.db` schema version 1: databases from 0.2.0 are backed up and recreated, not migrated.
-- OpenAI and Google batch adapters are not included; they are planned for 0.4.0.
+- `ticket_write` has no `touches` argument.
+
+**Files**
+- The `BOARD.md` account table has one column per quota window. `TELEMETRY.md` cost cells show `—` or `+ unpriced` for unpriced models.
+- `runtime.db`: databases from 0.2.0 are backed up to `runtime.db.v0.bak` and recreated, not migrated.
+
+OpenAI and Google batch adapters are not included; they are planned for 0.4.0.
