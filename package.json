@@ -1,0 +1,52 @@
+{
+  "name": "@tsomaia/harness-dsl",
+  "version": "0.1.0",
+  "private": false,
+  "license": "MIT",
+  "author": "Tornike Tsomaia",
+  "description": "Declarative Framework for building agentic loops",
+  "keywords": [
+    "harness",
+    "agents",
+    "dsl"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./plugins": {
+      "types": "./dist/plugins/index.d.ts",
+      "default": "./dist/plugins/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
+    "test": "vitest run test/unit",
+    "test:e2e": "vitest run test/e2e"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.0",
+    "@ai-sdk/google": "^3.0.0",
+    "@ai-sdk/openai": "^3.0.0",
+    "@modelcontextprotocol/sdk": "^1.25.0",
+    "ai": "^6.0.0",
+    "better-sqlite3": "^12.0.0",
+    "drizzle-orm": "^0.45.0",
+    "gray-matter": "^4.0.3",
+    "p-queue": "^9.0.0",
+    "picomatch": "^4.0.3",
+    "simple-git": "^3.30.0",
+    "tree-kill": "^1.2.2",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.19.0",
+    "@types/picomatch": "^4.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0"
+  }
+}
