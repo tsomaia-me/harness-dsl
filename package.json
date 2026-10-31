@@ -1,5 +1,5 @@
 {
-  "name": "@tsomaia/harness-dsl",
+  "name": "harness-dsl",
   "version": "0.1.0",
   "private": false,
   "type": "module",
@@ -24,7 +24,7 @@
     "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
     "test": "vitest run test/unit",
     "test:e2e": "vitest run test/e2e",
-    "prepublishOnly": "pnpm typecheck && pnpm build"
+    "prepublishOnly": "tsc -p tsconfig.typecheck.json --noEmit && tsc -p tsconfig.json"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.0",
