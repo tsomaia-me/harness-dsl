@@ -1,0 +1,2 @@
+export const DEFAULT_HANDOFF_BUFFER_TOKENS = 30_000;
+export const DEFAULT_MAX_HANDOFFS = 3;

@@ -11,22 +11,15 @@ import { FlowEngine } from './engine.js';
 import { HOOK_PATH } from './hooks.js';
 import { LocalRunner } from './runner.js';
 import { type HarnessStore, sumCosts } from './store.js';
-import type { AgentPlugin, Executable, ExecutionContext } from './types.js';
+import type { Executable, ExecutionContext, HookReceiver, HookRegistration } from './types.js';
 
-export class HarnessMcpServer {
+export class HarnessMcpServer implements HookReceiver {
   public readonly headDef: HeadDef;
   public readonly store: HarnessStore;
   public readonly engine: FlowEngine;
   private httpServer?: Server;
   public boundPort = 0;
-  private readonly activeRunPlugins = new Map<
-    string,
-    {
-      plugins: readonly AgentPlugin[];
-      workDir: string;
-      customTools?: ReadonlyMap<string, Executable<any, any>>;
-    }
-  >();
+  private readonly hookRegistrations = new Map<string, HookRegistration>();
   private readonly activeRunControllers = new Map<string, AbortController>();
 
   public constructor(headDef: HeadDef, store: HarnessStore, engine?: FlowEngine) {
@@ -43,23 +36,21 @@ export class HarnessMcpServer {
     return `${this.url}/mcp`;
   }
 
-  public registerRunPlugins(
-    runId: string,
-    plugins: readonly AgentPlugin[],
-    workDir: string,
-    customTools?: ReadonlyMap<string, Executable<any, any>>,
-  ): void {
-    this.activeRunPlugins.set(runId, { plugins, workDir, customTools });
+  public register(invocationId: string, registration: HookRegistration): void {
+    this.hookRegistrations.set(invocationId, registration);
   }
 
-  public unregisterRunPlugins(runId: string): void {
-    this.activeRunPlugins.delete(runId);
+  public unregister(invocationId: string): void {
+    this.hookRegistrations.delete(invocationId);
   }
 
   public async start(portOverride?: number): Promise<{ port: number; mcpUrl: string }> {
     const targetPort = portOverride ?? this.headDef.listenPort;
     this.httpServer = createServer((req, res) => {
-      void this.handleHttpRequest(req, res);
+      this.handleHttpRequest(req, res).catch((err: unknown) => {
+        if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+      });
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -105,7 +96,7 @@ export class HarnessMcpServer {
   private formatMcpResult(payload: Record<string, unknown>) {
     const activeHead = this.store.getActiveHeadSession();
     if (activeHead?.transcriptPath) {
-      const tokens = this.headDef.transcriptReaderFn(activeHead.transcriptPath);
+      const tokens = this.headDef.headProtocolValue.readContextTokens(activeHead.transcriptPath);
       if (tokens > 0 && tokens !== activeHead.contextTokens) {
         this.store.upsertHeadSession({
           sessionId: activeHead.sessionId,
@@ -155,7 +146,7 @@ export class HarnessMcpServer {
         const priorHandoffNote = existing?.handoffNote ?? null;
         const sessionId = args.sessionId ?? existing?.sessionId ?? `head-${randomUUID()}`;
         const contextTokens = args.transcriptPath
-          ? this.headDef.transcriptReaderFn(args.transcriptPath)
+          ? this.headDef.headProtocolValue.readContextTokens(args.transcriptPath)
           : (existing?.contextTokens ?? 0);
 
         this.store.upsertHeadSession({
@@ -244,16 +235,12 @@ export class HarnessMcpServer {
           void this.engine
             .run(flow, input ?? {}, {
               runId: assignedRunId,
-              hookServerUrl: this.url,
+              hookReceiver: this,
               signal: controller.signal,
-              onActivePluginsChange: (rId, plugins, workDir, customTools) => {
-                this.registerRunPlugins(rId, plugins, workDir, customTools);
-              },
             })
             .catch(() => undefined)
             .finally(() => {
               this.activeRunControllers.delete(assignedRunId);
-              this.unregisterRunPlugins(assignedRunId);
             });
           return this.formatMcpResult({ started: true, runId: assignedRunId });
         },
@@ -528,12 +515,10 @@ export class HarnessMcpServer {
     }
 
     const mergedCustomTools = new Map<string, Executable<any, any>>(this.headDef.customTools);
-    for (const active of this.activeRunPlugins.values()) {
-      if (active.customTools) {
-        for (const [k, v] of active.customTools.entries()) {
-          if (!mergedCustomTools.has(k)) {
-            mergedCustomTools.set(k, v);
-          }
+    for (const registration of this.hookRegistrations.values()) {
+      for (const [k, v] of registration.customTools.entries()) {
+        if (!mergedCustomTools.has(k)) {
+          mergedCustomTools.set(k, v);
         }
       }
     }
@@ -561,7 +546,7 @@ export class HarnessMcpServer {
             workDir: this.store.projectDir,
             touchedPaths: [],
             store: this.store,
-            hookServerUrl: this.url,
+            hookReceiver: this,
             signal: new AbortController().signal,
           };
           const out = await executable.execute(unwrapped, execCtx);
@@ -587,8 +572,7 @@ export class HarnessMcpServer {
         }
       }
       const responseJson = await this.handleHookCallback(
-        parsedUrl.searchParams.get('protocol'),
-        parsedUrl.searchParams.get('runId') ?? '',
+        parsedUrl.searchParams.get('invocation'),
         payload,
       );
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -613,20 +597,17 @@ export class HarnessMcpServer {
   }
 
   public async handleHookCallback(
-    protocolName: string | null,
-    runId: string,
+    invocationId: string | null,
     payload: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const protocol = protocolName
-      ? this.headDef.hookProtocols.get(protocolName)
-      : this.headDef.hookProtocols.values().next().value;
-    const event = protocol?.parse(payload);
-    if (!protocol || !event) return {};
+    const registration = invocationId ? this.hookRegistrations.get(invocationId) : undefined;
+    if (invocationId && !registration) return {};
+    const protocol = registration?.protocol ?? this.headDef.headProtocolValue;
+    const event = protocol.parse(payload);
+    if (!event) return {};
 
-    const tokens = event.contextTokens ?? 0;
-    if (runId.length > 0) {
-      if (tokens > 0) this.store.setRunContextTokens(runId, tokens);
-    } else {
+    const tokens = event.transcriptPath ? protocol.readContextTokens(event.transcriptPath) : 0;
+    if (!registration) {
       if (tokens > 0) {
         this.store.upsertHeadSession({
           sessionId: event.sessionId ?? 'head-session',
@@ -640,11 +621,12 @@ export class HarnessMcpServer {
           additionalContext: `Head context usage (${tokens} tokens) crossed threshold (${this.headDef.contextNoticeThresholdTokens}). Call harness_handoff({ note }) and compact or rotate.`,
         });
       }
+      return protocol.formatDecision(event, { allow: true });
     }
 
-    const active = this.activeRunPlugins.get(runId);
-    const ctx = { runId, store: this.store, workDir: active?.workDir ?? this.store.projectDir };
-    for (const plugin of active?.plugins ?? []) {
+    if (tokens > 0) this.store.setRunContextTokens(registration.runId, tokens);
+    const ctx = { runId: registration.runId, store: this.store, workDir: registration.workDir };
+    for (const plugin of registration.plugins) {
       const handler =
         event.phase === 'pre-tool'
           ? event.intent !== null && plugin.preTool?.intents.includes(event.intent)
@@ -654,7 +636,10 @@ export class HarnessMcpServer {
             ? plugin.stop
             : undefined;
       if (!handler) continue;
-      const decision = await handler.handle(event, ctx);
+      const decision = await handler.handle(event, ctx).catch((err: unknown) => ({
+        allow: false,
+        reason: `${plugin.name} failed: ${err instanceof Error ? err.message : String(err)}`,
+      }));
       if (!decision.allow) {
         return protocol.formatDecision(event, {
           allow: false,

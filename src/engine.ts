@@ -3,11 +3,11 @@ import PQueue from 'p-queue';
 import { BoundAgentSkill, ConditionalExecutable, type FlowDef, type FlowNode } from './dsl.js';
 import { type HarnessStore, sumCosts } from './store.js';
 import type {
-  AgentPlugin,
   BatchItemRequest,
   Executable,
   ExecutionContext,
   FlowContext,
+  HookReceiver,
 } from './types.js';
 
 export interface FlowRunOptions {
@@ -15,15 +15,9 @@ export interface FlowRunOptions {
   readonly ticketId?: string;
   readonly workDir?: string;
   readonly touchedPaths?: readonly string[];
-  readonly hookServerUrl?: string;
+  readonly hookReceiver?: HookReceiver;
   readonly signal?: AbortSignal;
   readonly batchPollIntervalMs?: number;
-  readonly onActivePluginsChange?: (
-    runId: string,
-    plugins: readonly AgentPlugin[],
-    workDir: string,
-    customTools?: ReadonlyMap<string, Executable<any, any>>,
-  ) => void;
 }
 
 export interface FlowRunResult<TSteps = Record<string, any>> {
@@ -80,7 +74,7 @@ export class FlowEngine {
       workDir: baseWorkDir,
       touchedPaths,
       store: this.store,
-      hookServerUrl: opts?.hookServerUrl,
+      hookReceiver: opts?.hookReceiver,
       signal,
     };
 
@@ -359,14 +353,6 @@ export class FlowEngine {
     executable: Executable<any, any>,
     opts?: FlowRunOptions,
   ): ExecutionContext {
-    if (executable instanceof BoundAgentSkill && opts?.onActivePluginsChange) {
-      opts.onActivePluginsChange(
-        baseExecCtx.runId,
-        executable.agent.plugins,
-        state.workDir,
-        executable.agent.customTools,
-      );
-    }
     return {
       ...baseExecCtx,
       iteration: state.iteration,

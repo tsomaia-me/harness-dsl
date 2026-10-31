@@ -4,7 +4,8 @@ import path from 'node:path';
 import { parseEnv } from 'node:util';
 import { z } from 'zod';
 import { drivers } from './drivers/index.js';
-import { claudeCodeHookProtocol, readClaudeCodeTranscriptTokens } from './protocols/claude-code.js';
+import { DEFAULT_HANDOFF_BUFFER_TOKENS, DEFAULT_MAX_HANDOFFS } from './defaults.js';
+import { claudeCodeHookProtocol } from './protocols/claude-code.js';
 import { AccountDef, PoolDef, RateLimitedError } from './quota.js';
 import { LocalRunner, type LocalRunnerOptions, SshRunner, type SshRunnerOptions } from './runner.js';
 import type {
@@ -372,7 +373,15 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
       stop: this.agent.plugins.some((p) => p.stop !== undefined),
     };
 
+    const hasPlugins = this.agent.plugins.length > 0;
+    if (hasPlugins && !ctx.hookReceiver) {
+      throw new Error(
+        `Agent "${this.agent.name}" has hook plugins but the run has no hook receiver; run it through startOrchestrator`,
+      );
+    }
+
     let attempt = 0;
+    let handoffs = 0;
     let validationFeedback = '';
     let handoffContext = '';
     let currentSessionId: string | undefined;
@@ -380,6 +389,12 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
 
     while (attempt <= this.skill.maxRetriesCount) {
       const resolvedAccount = await this.agent.modelDef.accountProvider.acquireAccount(ctx.store);
+      const hookProtocol = resolvedAccount.driver.hookProtocol;
+      if (hasPlugins && !hookProtocol) {
+        throw new Error(
+          `Agent "${this.agent.name}" uses account "${resolvedAccount.accountId}", whose ${resolvedAccount.driver.kind} driver cannot deliver hook plugins`,
+        );
+      }
       const invId = `inv-${randomUUID()}`;
       ctx.store.startInvocation({
         id: invId,
@@ -397,6 +412,15 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
         .filter((s) => s.length > 0)
         .join('\n\n');
 
+      const hookReceiver = hookProtocol ? ctx.hookReceiver : undefined;
+      hookReceiver?.register(invId, {
+        runId: ctx.runId,
+        workDir: ctx.workDir,
+        protocol: hookProtocol!,
+        plugins: this.agent.plugins,
+        customTools: this.agent.customTools,
+      });
+
       try {
         const result = await resolvedAccount.driver.invoke({
           accountId: resolvedAccount.accountId,
@@ -411,7 +435,8 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
           customTools: this.agent.customTools,
           maxContextTokens: this.agent.maxContextTokensLimit,
           handoffBufferTokens: this.agent.handoffBufferTokensValue,
-          hookServerUrl: ctx.hookServerUrl,
+          hookServerUrl: hookReceiver?.url,
+          invocationId: invId,
           hookSubscriptions,
           runId: ctx.runId,
           stepName: ctx.stepName,
@@ -426,6 +451,17 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
         }
 
         if (result.handoffRequested) {
+          handoffs += 1;
+          if (handoffs > this.agent.maxHandoffsValue) {
+            const message = `Skill "${this.skill.name}" on agent "${this.agent.name}" exceeded ${this.agent.maxHandoffsValue} handoffs`;
+            ctx.store.finishInvocation(invId, {
+              status: 'fail',
+              sessionId: result.sessionId,
+              ...result.usage,
+              errorText: message,
+            });
+            throw new HandoffLimitError(message);
+          }
           ctx.store.finishInvocation(invId, {
             status: 'pass',
             sessionId: result.sessionId,
@@ -472,11 +508,19 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
 
         return parsedOut.data;
       } catch (err: any) {
+        if (err instanceof HandoffLimitError) {
+          throw err;
+        }
+
         if (err instanceof RateLimitedError) {
+          const now = Date.now();
+          const reported = err.quota.cooldownUntilMs;
           ctx.store.upsertAccountQuota(resolvedAccount.accountId, {
             ...err.quota,
             cooldownUntilMs:
-              err.quota.cooldownUntilMs ?? Date.now() + resolvedAccount.quotaPolicy.defaultCooldownMs,
+              typeof reported === 'number' && reported > now
+                ? reported
+                : now + resolvedAccount.quotaPolicy.defaultCooldownMs,
           });
           ctx.store.finishInvocation(invId, {
             status: 'fail',
@@ -510,10 +554,19 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
           errorText: err instanceof Error ? err.message : String(err),
         });
         throw err;
+      } finally {
+        hookReceiver?.unregister(invId);
       }
     }
 
     throw new Error(`Skill "${this.skill.name}" exhausted retries`);
+  }
+}
+
+export class HandoffLimitError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'HandoffLimitError';
   }
 }
 
@@ -530,7 +583,18 @@ class SchemaValidationError extends Error {
   }
 }
 
-export const DEFAULT_HANDOFF_BUFFER_TOKENS = 30_000;
+export interface AgentOptions {
+  readonly modelDef?: ModelDef;
+  readonly maxContextTokensLimit?: number;
+  readonly inactivityTimeoutMsValue?: number;
+  readonly promptText?: string;
+  readonly promptFilePath?: string;
+  readonly allowedTools?: readonly string[];
+  readonly customTools?: ReadonlyMap<string, Executable<any, any>>;
+  readonly plugins?: readonly AgentPlugin[];
+  readonly handoffBufferTokensValue?: number;
+  readonly maxHandoffsValue?: number;
+}
 
 export class AgentDef {
   public readonly name: string;
@@ -543,159 +607,66 @@ export class AgentDef {
   public readonly customTools: ReadonlyMap<string, Executable<any, any>>;
   public readonly plugins: readonly AgentPlugin[];
   public readonly handoffBufferTokensValue: number;
+  public readonly maxHandoffsValue: number;
+  private readonly opts: AgentOptions;
 
-  public constructor(
-    name: string,
-    opts?: {
-      modelDef?: ModelDef;
-      maxContextTokensLimit?: number;
-      inactivityTimeoutMsValue?: number;
-      promptText?: string;
-      promptFilePath?: string;
-      allowedTools?: readonly string[];
-      customTools?: ReadonlyMap<string, Executable<any, any>>;
-      plugins?: readonly AgentPlugin[];
-      handoffBufferTokensValue?: number;
-    },
-  ) {
+  public constructor(name: string, opts: AgentOptions = {}) {
     this.name = name;
-    this.modelDef = opts?.modelDef;
-    this.maxContextTokensLimit = opts?.maxContextTokensLimit;
-    this.inactivityTimeoutMsValue = opts?.inactivityTimeoutMsValue ?? 120_000;
-    this.promptText = opts?.promptText;
-    this.promptFilePath = opts?.promptFilePath;
-    this.allowedTools = opts?.allowedTools ?? [];
-    this.customTools = opts?.customTools ?? new Map();
-    this.plugins = opts?.plugins ?? [];
-    this.handoffBufferTokensValue = opts?.handoffBufferTokensValue ?? DEFAULT_HANDOFF_BUFFER_TOKENS;
+    this.opts = opts;
+    this.modelDef = opts.modelDef;
+    this.maxContextTokensLimit = opts.maxContextTokensLimit;
+    this.inactivityTimeoutMsValue = opts.inactivityTimeoutMsValue ?? 120_000;
+    this.promptText = opts.promptText;
+    this.promptFilePath = opts.promptFilePath;
+    this.allowedTools = opts.allowedTools ?? [];
+    this.customTools = opts.customTools ?? new Map();
+    this.plugins = opts.plugins ?? [];
+    this.handoffBufferTokensValue = opts.handoffBufferTokensValue ?? DEFAULT_HANDOFF_BUFFER_TOKENS;
+    this.maxHandoffsValue = opts.maxHandoffsValue ?? DEFAULT_MAX_HANDOFFS;
+  }
+
+  private with(patch: AgentOptions): AgentDef {
+    return new AgentDef(this.name, { ...this.opts, ...patch });
   }
 
   public model(modelDef: ModelDef): AgentDef {
-    return new AgentDef(this.name, {
-      modelDef,
-      maxContextTokensLimit: this.maxContextTokensLimit,
-      inactivityTimeoutMsValue: this.inactivityTimeoutMsValue,
-      promptText: this.promptText,
-      promptFilePath: this.promptFilePath,
-      allowedTools: this.allowedTools,
-      customTools: this.customTools,
-      plugins: this.plugins,
-      handoffBufferTokensValue: this.handoffBufferTokensValue,
-    });
+    return this.with({ modelDef });
   }
 
   public maxContextTokens(limit: number): AgentDef {
-    return new AgentDef(this.name, {
-      modelDef: this.modelDef,
-      maxContextTokensLimit: limit,
-      inactivityTimeoutMsValue: this.inactivityTimeoutMsValue,
-      promptText: this.promptText,
-      promptFilePath: this.promptFilePath,
-      allowedTools: this.allowedTools,
-      customTools: this.customTools,
-      plugins: this.plugins,
-      handoffBufferTokensValue: this.handoffBufferTokensValue,
-    });
+    return this.with({ maxContextTokensLimit: limit });
   }
 
   public handoffBuffer(tokens: number): AgentDef {
-    return new AgentDef(this.name, {
-      modelDef: this.modelDef,
-      maxContextTokensLimit: this.maxContextTokensLimit,
-      inactivityTimeoutMsValue: this.inactivityTimeoutMsValue,
-      promptText: this.promptText,
-      promptFilePath: this.promptFilePath,
-      allowedTools: this.allowedTools,
-      customTools: this.customTools,
-      plugins: this.plugins,
-      handoffBufferTokensValue: tokens,
-    });
+    return this.with({ handoffBufferTokensValue: tokens });
+  }
+
+  public maxHandoffs(count: number): AgentDef {
+    return this.with({ maxHandoffsValue: count });
   }
 
   public inactivityTimeoutMs(ms: number): AgentDef {
-    return new AgentDef(this.name, {
-      modelDef: this.modelDef,
-      maxContextTokensLimit: this.maxContextTokensLimit,
-      inactivityTimeoutMsValue: ms,
-      promptText: this.promptText,
-      promptFilePath: this.promptFilePath,
-      allowedTools: this.allowedTools,
-      customTools: this.customTools,
-      plugins: this.plugins,
-      handoffBufferTokensValue: this.handoffBufferTokensValue,
-    });
+    return this.with({ inactivityTimeoutMsValue: ms });
   }
 
   public prompt(text: string): AgentDef {
-    return new AgentDef(this.name, {
-      modelDef: this.modelDef,
-      maxContextTokensLimit: this.maxContextTokensLimit,
-      inactivityTimeoutMsValue: this.inactivityTimeoutMsValue,
-      promptText: text,
-      promptFilePath: this.promptFilePath,
-      allowedTools: this.allowedTools,
-      customTools: this.customTools,
-      plugins: this.plugins,
-      handoffBufferTokensValue: this.handoffBufferTokensValue,
-    });
+    return this.with({ promptText: text });
   }
 
   public promptFile(filePath: string): AgentDef {
-    return new AgentDef(this.name, {
-      modelDef: this.modelDef,
-      maxContextTokensLimit: this.maxContextTokensLimit,
-      inactivityTimeoutMsValue: this.inactivityTimeoutMsValue,
-      promptText: this.promptText,
-      promptFilePath: filePath,
-      allowedTools: this.allowedTools,
-      customTools: this.customTools,
-      plugins: this.plugins,
-      handoffBufferTokensValue: this.handoffBufferTokensValue,
-    });
+    return this.with({ promptFilePath: filePath });
   }
 
   public tools(toolNames: readonly string[]): AgentDef {
-    return new AgentDef(this.name, {
-      modelDef: this.modelDef,
-      maxContextTokensLimit: this.maxContextTokensLimit,
-      inactivityTimeoutMsValue: this.inactivityTimeoutMsValue,
-      promptText: this.promptText,
-      promptFilePath: this.promptFilePath,
-      allowedTools: [...toolNames],
-      customTools: this.customTools,
-      plugins: this.plugins,
-      handoffBufferTokensValue: this.handoffBufferTokensValue,
-    });
+    return this.with({ allowedTools: [...toolNames] });
   }
 
   public tool(name: string, executable: Executable<any, any>): AgentDef {
-    const nextMap = new Map(this.customTools);
-    nextMap.set(name, executable);
-    return new AgentDef(this.name, {
-      modelDef: this.modelDef,
-      maxContextTokensLimit: this.maxContextTokensLimit,
-      inactivityTimeoutMsValue: this.inactivityTimeoutMsValue,
-      promptText: this.promptText,
-      promptFilePath: this.promptFilePath,
-      allowedTools: this.allowedTools,
-      customTools: nextMap,
-      plugins: this.plugins,
-      handoffBufferTokensValue: this.handoffBufferTokensValue,
-    });
+    return this.with({ customTools: new Map([...this.customTools, [name, executable]]) });
   }
 
   public use(plugin: AgentPlugin): AgentDef {
-    return new AgentDef(this.name, {
-      modelDef: this.modelDef,
-      maxContextTokensLimit: this.maxContextTokensLimit,
-      inactivityTimeoutMsValue: this.inactivityTimeoutMsValue,
-      promptText: this.promptText,
-      promptFilePath: this.promptFilePath,
-      allowedTools: this.allowedTools,
-      customTools: this.customTools,
-      plugins: [...this.plugins, plugin],
-      handoffBufferTokensValue: this.handoffBufferTokensValue,
-    });
+    return this.with({ plugins: [...this.plugins, plugin] });
   }
 
   public run<TInput, TOutput, TFlowCtx = any>(
@@ -802,6 +773,17 @@ export interface FlowIdentifiers<TInput> {
   readonly touchedPaths?: (input: TInput) => readonly string[];
 }
 
+export interface FlowOptions<TInput, TSteps extends Record<string, any>> {
+  readonly inputSchema?: z.ZodType<TInput>;
+  readonly nodes?: readonly FlowNode[];
+  readonly middlewares?: readonly FlowMiddleware[];
+  readonly identifiers?: FlowIdentifiers<TInput>;
+  readonly errorHandler?: (error: unknown, ctx: FlowContext<TInput, TSteps>) => Promise<void> | void;
+  readonly finallyHandler?:
+    | Executable<any, any>
+    | ((ctx: FlowContext<TInput, TSteps>) => Promise<void> | void);
+}
+
 export class FlowDef<
   TInput = unknown,
   TSteps extends Record<string, any> = {},
@@ -822,20 +804,11 @@ export class FlowDef<
     | Executable<any, any>
     | ((ctx: FlowContext<TInput, TSteps>) => Promise<void> | void);
 
-  public constructor(
-    name: string,
-    opts?: {
-      inputSchema?: z.ZodType<TInput>;
-      nodes?: readonly FlowNode[];
-      middlewares?: readonly FlowMiddleware[];
-      identifiers?: FlowIdentifiers<TInput>;
-      errorHandler?: (error: unknown, ctx: FlowContext<TInput, TSteps>) => Promise<void> | void;
-      finallyHandler?:
-        | Executable<any, any>
-        | ((ctx: FlowContext<TInput, TSteps>) => Promise<void> | void);
-    },
-  ) {
+  private readonly opts: FlowOptions<TInput, TSteps>;
+
+  public constructor(name: string, opts?: FlowOptions<TInput, TSteps>) {
     this.name = name;
+    this.opts = opts ?? {};
     this.inputSchema = (opts?.inputSchema ?? z.any()) as z.ZodType<TInput>;
     this.outputSchema = z.any() as z.ZodType<TSteps>;
     this.nodes = opts?.nodes ?? [];
@@ -845,15 +818,17 @@ export class FlowDef<
     this.finallyHandler = opts?.finallyHandler;
   }
 
-  public identify(identifiers: FlowIdentifiers<TInput>): FlowDef<TInput, TSteps> {
-    return new FlowDef<TInput, TSteps>(this.name, {
-      inputSchema: this.inputSchema,
-      nodes: this.nodes,
-      middlewares: this.middlewares,
-      identifiers,
-      errorHandler: this.errorHandler,
-      finallyHandler: this.finallyHandler,
+  private with<TNewSteps extends Record<string, any> = TSteps>(
+    patch: FlowOptions<TInput, any>,
+  ): FlowDef<TInput, TNewSteps> {
+    return new FlowDef<TInput, TNewSteps>(this.name, {
+      ...(this.opts as FlowOptions<TInput, any>),
+      ...patch,
     });
+  }
+
+  public identify(identifiers: FlowIdentifiers<TInput>): FlowDef<TInput, TSteps> {
+    return this.with({ identifiers });
   }
 
   public input<TNewInput>(schema: z.ZodType<TNewInput>): FlowDef<TNewInput, TSteps> {
@@ -863,19 +838,11 @@ export class FlowDef<
       middlewares: this.middlewares,
       errorHandler: this.errorHandler as any,
       finallyHandler: this.finallyHandler as any,
-      identifiers: this.identifiers as FlowIdentifiers<any>,
     });
   }
 
   public use(middleware: FlowMiddleware): FlowDef<TInput, TSteps> {
-    return new FlowDef<TInput, TSteps>(this.name, {
-      inputSchema: this.inputSchema,
-      nodes: this.nodes,
-      middlewares: [...this.middlewares, middleware],
-      errorHandler: this.errorHandler,
-      finallyHandler: this.finallyHandler,
-      identifiers: this.identifiers,
-    });
+    return this.with({ middlewares: [...this.middlewares, middleware] });
   }
 
   public step<K extends string, TStepIn, TStepOut>(
@@ -894,14 +861,7 @@ export class FlowDef<
       executable,
       mapInput: mapper,
     };
-    return new FlowDef<TInput, TSteps & Record<K, TStepOut>>(this.name, {
-      inputSchema: this.inputSchema,
-      nodes: [...this.nodes, node],
-      middlewares: this.middlewares,
-      errorHandler: this.errorHandler as any,
-      finallyHandler: this.finallyHandler as any,
-      identifiers: this.identifiers,
-    });
+    return this.with<TSteps & Record<K, TStepOut>>({ nodes: [...this.nodes, node] });
   }
 
   public when<TSubOut extends Record<string, any>>(
@@ -929,14 +889,7 @@ export class FlowDef<
         predicate,
         subflow,
       };
-      return new FlowDef(this.name, {
-        inputSchema: this.inputSchema,
-        nodes: [...this.nodes, node],
-        middlewares: this.middlewares,
-        errorHandler: this.errorHandler as any,
-        finallyHandler: this.finallyHandler as any,
-        identifiers: this.identifiers,
-      });
+      return this.with<any>({ nodes: [...this.nodes, node] });
     }
 
     const mapper =
@@ -949,14 +902,7 @@ export class FlowDef<
       stepName: target.name,
       mapInput: mapper,
     };
-    return new FlowDef(this.name, {
-      inputSchema: this.inputSchema,
-      nodes: [...this.nodes, node],
-      middlewares: this.middlewares,
-      errorHandler: this.errorHandler as any,
-      finallyHandler: this.finallyHandler as any,
-      identifiers: this.identifiers,
-    });
+    return this.with<any>({ nodes: [...this.nodes, node] });
   }
 
   public branch<
@@ -985,14 +931,7 @@ export class FlowDef<
       selector: selector as (ctx: FlowContext<any, any>) => string,
       branches: compiled,
     };
-    return new FlowDef(this.name, {
-      inputSchema: this.inputSchema,
-      nodes: [...this.nodes, node],
-      middlewares: this.middlewares,
-      errorHandler: this.errorHandler as any,
-      finallyHandler: this.finallyHandler as any,
-      identifiers: this.identifiers,
-    });
+    return this.with<any>({ nodes: [...this.nodes, node] });
   }
 
   public parallel<
@@ -1020,14 +959,7 @@ export class FlowDef<
       type: 'parallel',
       branches,
     };
-    return new FlowDef(this.name, {
-      inputSchema: this.inputSchema,
-      nodes: [...this.nodes, node],
-      middlewares: this.middlewares,
-      errorHandler: this.errorHandler as any,
-      finallyHandler: this.finallyHandler as any,
-      identifiers: this.identifiers,
-    });
+    return this.with<any>({ nodes: [...this.nodes, node] });
   }
 
   public loop<TLoopSteps extends Record<string, any>>(config: {
@@ -1044,14 +976,7 @@ export class FlowDef<
       bodyFlow,
       until: config.until,
     };
-    return new FlowDef<TInput, TSteps & TLoopSteps>(this.name, {
-      inputSchema: this.inputSchema,
-      nodes: [...this.nodes, node],
-      middlewares: this.middlewares,
-      errorHandler: this.errorHandler as any,
-      finallyHandler: this.finallyHandler as any,
-      identifiers: this.identifiers,
-    });
+    return this.with<TSteps & TLoopSteps>({ nodes: [...this.nodes, node] });
   }
 
   public batch<K extends string, TItem, TOut>(
@@ -1071,14 +996,7 @@ export class FlowDef<
       execute: config.execute,
       concurrency: config.concurrency ?? 5,
     };
-    return new FlowDef<TInput, TSteps & Record<K, TOut[]>>(this.name, {
-      inputSchema: this.inputSchema,
-      nodes: [...this.nodes, node],
-      middlewares: this.middlewares,
-      errorHandler: this.errorHandler as any,
-      finallyHandler: this.finallyHandler as any,
-      identifiers: this.identifiers,
-    });
+    return this.with<TSteps & Record<K, TOut[]>>({ nodes: [...this.nodes, node] });
   }
 
   public haltIf(
@@ -1090,40 +1008,19 @@ export class FlowDef<
       predicate,
       mapBlocker,
     };
-    return new FlowDef<TInput, TSteps>(this.name, {
-      inputSchema: this.inputSchema,
-      nodes: [...this.nodes, node],
-      middlewares: this.middlewares,
-      errorHandler: this.errorHandler,
-      finallyHandler: this.finallyHandler,
-      identifiers: this.identifiers,
-    });
+    return this.with({ nodes: [...this.nodes, node] });
   }
 
   public onError(
     handler: (error: unknown, ctx: FlowContext<TInput, TSteps>) => Promise<void> | void,
   ): FlowDef<TInput, TSteps> {
-    return new FlowDef<TInput, TSteps>(this.name, {
-      inputSchema: this.inputSchema,
-      nodes: this.nodes,
-      middlewares: this.middlewares,
-      errorHandler: handler,
-      finallyHandler: this.finallyHandler,
-      identifiers: this.identifiers,
-    });
+    return this.with({ errorHandler: handler });
   }
 
   public finally(
     handler: Executable<any, any> | ((ctx: FlowContext<TInput, TSteps>) => Promise<void> | void),
   ): FlowDef<TInput, TSteps> {
-    return new FlowDef<TInput, TSteps>(this.name, {
-      inputSchema: this.inputSchema,
-      nodes: this.nodes,
-      middlewares: this.middlewares,
-      errorHandler: this.errorHandler,
-      finallyHandler: handler,
-      identifiers: this.identifiers,
-    });
+    return this.with({ finallyHandler: handler });
   }
 
   public async execute(input: TInput, ctx: ExecutionContext): Promise<TSteps> {
@@ -1132,11 +1029,20 @@ export class FlowDef<
     const result = await engine.run(this, input, {
       runId: ctx.runId,
       workDir: ctx.workDir,
-      hookServerUrl: ctx.hookServerUrl,
+      hookReceiver: ctx.hookReceiver,
       signal: ctx.signal,
     });
     return result.steps;
   }
+}
+
+export interface HeadOptions {
+  readonly capabilitySet?: ReadonlySet<HeadCapability>;
+  readonly contextNoticeThresholdTokens?: number;
+  readonly listenPort?: number;
+  readonly customTools?: ReadonlyMap<string, Executable<any, any>>;
+  readonly flows?: ReadonlyMap<string, FlowDef<any, any>>;
+  readonly headProtocol?: HookProtocol;
 }
 
 export class HeadDef {
@@ -1145,116 +1051,45 @@ export class HeadDef {
   public readonly listenPort: number;
   public readonly customTools: ReadonlyMap<string, Executable<any, any>>;
   public readonly flows: ReadonlyMap<string, FlowDef<any, any>>;
-  public readonly hookProtocols: ReadonlyMap<string, HookProtocol>;
-  public readonly transcriptReaderFn: (transcriptPath: string) => number;
+  public readonly headProtocolValue: HookProtocol;
+  private readonly opts: HeadOptions;
 
-  public constructor(opts?: {
-    capabilitySet?: ReadonlySet<HeadCapability>;
-    contextNoticeThresholdTokens?: number;
-    listenPort?: number;
-    customTools?: ReadonlyMap<string, Executable<any, any>>;
-    flows?: ReadonlyMap<string, FlowDef<any, any>>;
-    hookProtocols?: ReadonlyMap<string, HookProtocol>;
-    transcriptReaderFn?: (transcriptPath: string) => number;
-  }) {
-    this.capabilitySet = opts?.capabilitySet ?? new Set<HeadCapability>();
-    this.contextNoticeThresholdTokens = opts?.contextNoticeThresholdTokens ?? 180_000;
-    this.listenPort = opts?.listenPort ?? 4100;
-    this.customTools = opts?.customTools ?? new Map();
-    this.flows = opts?.flows ?? new Map();
-    this.hookProtocols =
-      opts?.hookProtocols ?? new Map([[claudeCodeHookProtocol.name, claudeCodeHookProtocol]]);
-    this.transcriptReaderFn = opts?.transcriptReaderFn ?? readClaudeCodeTranscriptTokens;
+  public constructor(opts: HeadOptions = {}) {
+    this.opts = opts;
+    this.capabilitySet = opts.capabilitySet ?? new Set<HeadCapability>();
+    this.contextNoticeThresholdTokens = opts.contextNoticeThresholdTokens ?? 180_000;
+    this.listenPort = opts.listenPort ?? 4100;
+    this.customTools = opts.customTools ?? new Map();
+    this.flows = opts.flows ?? new Map();
+    this.headProtocolValue = opts.headProtocol ?? claudeCodeHookProtocol;
+  }
+
+  private with(patch: HeadOptions): HeadDef {
+    return new HeadDef({ ...this.opts, ...patch });
   }
 
   public capabilities(caps: readonly HeadCapability[]): HeadDef {
-    return new HeadDef({
-      capabilitySet: new Set(caps),
-      contextNoticeThresholdTokens: this.contextNoticeThresholdTokens,
-      listenPort: this.listenPort,
-      customTools: this.customTools,
-      flows: this.flows,
-      hookProtocols: this.hookProtocols,
-      transcriptReaderFn: this.transcriptReaderFn,
-    });
+    return this.with({ capabilitySet: new Set(caps) });
   }
 
   public contextNoticeThreshold(tokens: number): HeadDef {
-    return new HeadDef({
-      capabilitySet: this.capabilitySet,
-      contextNoticeThresholdTokens: tokens,
-      listenPort: this.listenPort,
-      customTools: this.customTools,
-      flows: this.flows,
-      hookProtocols: this.hookProtocols,
-      transcriptReaderFn: this.transcriptReaderFn,
-    });
+    return this.with({ contextNoticeThresholdTokens: tokens });
   }
 
   public port(listenPort: number): HeadDef {
-    return new HeadDef({
-      capabilitySet: this.capabilitySet,
-      contextNoticeThresholdTokens: this.contextNoticeThresholdTokens,
-      listenPort,
-      customTools: this.customTools,
-      flows: this.flows,
-      hookProtocols: this.hookProtocols,
-      transcriptReaderFn: this.transcriptReaderFn,
-    });
+    return this.with({ listenPort });
   }
 
   public tool(name: string, executable: Executable<any, any>): HeadDef {
-    const next = new Map(this.customTools);
-    next.set(name, executable);
-    return new HeadDef({
-      capabilitySet: this.capabilitySet,
-      contextNoticeThresholdTokens: this.contextNoticeThresholdTokens,
-      listenPort: this.listenPort,
-      customTools: next,
-      flows: this.flows,
-      hookProtocols: this.hookProtocols,
-      transcriptReaderFn: this.transcriptReaderFn,
-    });
+    return this.with({ customTools: new Map([...this.customTools, [name, executable]]) });
   }
 
-  public hookProtocol(protocol: HookProtocol): HeadDef {
-    const next = new Map(this.hookProtocols);
-    next.set(protocol.name, protocol);
-    return new HeadDef({
-      capabilitySet: this.capabilitySet,
-      contextNoticeThresholdTokens: this.contextNoticeThresholdTokens,
-      listenPort: this.listenPort,
-      customTools: this.customTools,
-      flows: this.flows,
-      hookProtocols: next,
-      transcriptReaderFn: this.transcriptReaderFn,
-    });
-  }
-
-  public transcriptReader(reader: (transcriptPath: string) => number): HeadDef {
-    return new HeadDef({
-      capabilitySet: this.capabilitySet,
-      contextNoticeThresholdTokens: this.contextNoticeThresholdTokens,
-      listenPort: this.listenPort,
-      customTools: this.customTools,
-      flows: this.flows,
-      hookProtocols: this.hookProtocols,
-      transcriptReaderFn: reader,
-    });
+  public headProtocol(protocol: HookProtocol): HeadDef {
+    return this.with({ headProtocol: protocol });
   }
 
   public registerFlow(flow: FlowDef<any, any>): HeadDef {
-    const next = new Map(this.flows);
-    next.set(flow.name, flow);
-    return new HeadDef({
-      capabilitySet: this.capabilitySet,
-      contextNoticeThresholdTokens: this.contextNoticeThresholdTokens,
-      listenPort: this.listenPort,
-      customTools: this.customTools,
-      flows: next,
-      hookProtocols: this.hookProtocols,
-      transcriptReaderFn: this.transcriptReaderFn,
-    });
+    return this.with({ flows: new Map([...this.flows, [flow.name, flow]]) });
   }
 }
 

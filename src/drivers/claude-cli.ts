@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { DEFAULT_HANDOFF_BUFFER_TOKENS } from '../defaults.js';
 import { hookEndpointUrl } from '../hooks.js';
 import { anthropicPricing } from '../pricing/anthropic.js';
 import { claudeCodeHookProtocol } from '../protocols/claude-code.js';
@@ -72,6 +73,7 @@ export class ClaudeCliDriver implements Driver {
   private readonly spawnBridge?: ClaudeCliSpawnBridge;
   public readonly probeQuota?: (accountId: string) => Promise<QuotaPatch>;
   public readonly quotaPolicy = CLAUDE_SUBSCRIPTION_QUOTA_POLICY;
+  public readonly hookProtocol = claudeCodeHookProtocol;
 
   public constructor(opts?: ClaudeCliDriverOptions) {
     this.configDir = opts?.configDir ? expandHome(opts.configDir) : undefined;
@@ -134,7 +136,12 @@ export class ClaudeCliDriver implements Driver {
     let mcpConfigFilePath: string | undefined;
 
     const subscriptions = req.hookSubscriptions;
-    if (req.hookServerUrl && subscriptions && (subscriptions.preToolIntents.length > 0 || subscriptions.stop)) {
+    if (
+      req.hookServerUrl &&
+      req.invocationId &&
+      subscriptions &&
+      (subscriptions.preToolIntents.length > 0 || subscriptions.stop)
+    ) {
       const settingsDir = path.join(tmpdir(), 'harness-cli-settings');
       mkdirSync(settingsDir, { recursive: true });
       settingsFilePath = path.join(
@@ -142,7 +149,7 @@ export class ClaudeCliDriver implements Driver {
         `settings-${req.runId}-${req.stepName}-${randomUUID()}.json`,
       );
       const settingsPayload = claudeCodeHookProtocol.buildSettings(
-        hookEndpointUrl(req.hookServerUrl, claudeCodeHookProtocol.name, req.runId),
+        hookEndpointUrl(req.hookServerUrl, req.invocationId),
         subscriptions,
       );
       writeFileSync(settingsFilePath, JSON.stringify(settingsPayload, null, 2), 'utf8');
@@ -208,7 +215,7 @@ export class ClaudeCliDriver implements Driver {
           const totalContext = inTok + cacheCreate + cacheRead + outTok;
           if (
             req.maxContextTokens &&
-            totalContext >= req.maxContextTokens - (req.handoffBufferTokens ?? 0)
+            totalContext >= req.maxContextTokens - (req.handoffBufferTokens ?? DEFAULT_HANDOFF_BUFFER_TOKENS)
           ) {
             handoffTriggered = true;
           }

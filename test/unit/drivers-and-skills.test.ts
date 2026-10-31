@@ -28,7 +28,7 @@ describe('Drivers, Skills, Commands, and Agent Execution', () => {
       workDir: dir,
       touchedPaths: ['apps/admin/src/UsersPage.tsx'],
       store,
-      hookServerUrl: 'http://127.0.0.1:4100',
+      hookReceiver: { url: 'http://127.0.0.1:4100', register: () => undefined, unregister: () => undefined },
       signal: new AbortController().signal,
     };
     return { store, ctx, dir };

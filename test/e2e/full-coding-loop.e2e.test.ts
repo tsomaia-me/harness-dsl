@@ -181,12 +181,7 @@ describe('Live E2E 3: Full Coding Loop (Builder -> Stop Hook -> Dispute Arbiter 
             { id: 'AC-2', text: 'add(a, b) returns a formatted currency string instead of a number' },
           ],
         },
-        {
-          hookServerUrl: orch.mcpServer.url,
-          onActivePluginsChange: (rId, plugins, workDir, customTools) => {
-            orch.mcpServer.registerRunPlugins(rId, plugins, workDir, customTools);
-          },
-        },
+        { hookReceiver: orch.mcpServer },
       );
 
       expect.soft(res.steps.testCheck.passed).toBe(true);

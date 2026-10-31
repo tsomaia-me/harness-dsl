@@ -5,7 +5,7 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, describe, expect, it } from 'vitest';
-import { H, HarnessStore, startOrchestrator, z } from '../../src/index.js';
+import { type AgentPlugin, claudeCodeHookProtocol, H, HarnessStore, startOrchestrator, z } from '../../src/index.js';
 import {
   fileLeaseGuard,
   gitWorktreeIsolation,
@@ -84,7 +84,7 @@ describe('First-Party Plugins & Head MCP Server', () => {
       mapInput: ({ workDir }) => ({ dir: workDir }),
       verdict: (out) => ({ allow: out.exitCode === 0, reason: out.log }),
     });
-    const event = { phase: 'stop', intent: null, filePaths: [] } as const;
+    const event = { phase: 'stop', intent: null, filePaths: [], raw: {} } as const;
     await expect(hook.stop!.handle(event, { runId: 'run-L', store, workDir: repoDir })).resolves.toEqual({
       allow: false,
       reason: `3 errors in ${path.basename(repoDir)}`,
@@ -158,12 +158,16 @@ describe('First-Party Plugins & Head MCP Server', () => {
     const orch = await startOrchestrator({ projectDir: repoDir, head });
     expect.soft(existsSync(path.join(repoDir, '.mcp.json'))).toBe(true);
 
-    orch.mcpServer.registerRunPlugins(
-      'run-A',
-      [fileLeaseGuard(), stopCommandHook(CheckCmd)],
-      repoDir,
-    );
-    orch.mcpServer.registerRunPlugins('run-B', [fileLeaseGuard()], repoDir);
+    const registerPlugins = (runId: string, plugins: AgentPlugin[]) =>
+      orch.mcpServer.register(runId, {
+        runId,
+        workDir: repoDir,
+        protocol: claudeCodeHookProtocol,
+        plugins,
+        customTools: new Map(),
+      });
+    registerPlugins('run-A', [fileLeaseGuard(), stopCommandHook(CheckCmd)]);
+    registerPlugins('run-B', [fileLeaseGuard()]);
 
     const agentTranscriptPath = path.join(repoDir, 'agent-transcript.jsonl');
     writeFileSync(
@@ -181,7 +185,7 @@ describe('First-Party Plugins & Head MCP Server', () => {
       'utf8',
     );
 
-    const preRes1 = await fetch(`${orch.mcpServer.url}/internal/hook?runId=run-A`, {
+    const preRes1 = await fetch(`${orch.mcpServer.url}/internal/hook?invocation=run-A`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -195,7 +199,7 @@ describe('First-Party Plugins & Head MCP Server', () => {
     expect.soft(orch.store.getRunContextTokens('run-A')).toBe(195_000);
     expect.soft(orch.store.getActiveHeadSession()).toBeNull();
 
-    const preRes2 = await fetch(`${orch.mcpServer.url}/internal/hook?runId=run-B`, {
+    const preRes2 = await fetch(`${orch.mcpServer.url}/internal/hook?invocation=run-B`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -207,7 +211,7 @@ describe('First-Party Plugins & Head MCP Server', () => {
     }).then((r) => r.json() as Promise<Record<string, any>>);
     expect.soft(preRes2.hookSpecificOutput?.permissionDecision).toBe('deny');
 
-    const stopBlocked = await fetch(`${orch.mcpServer.url}/internal/hook?runId=run-A`, {
+    const stopBlocked = await fetch(`${orch.mcpServer.url}/internal/hook?invocation=run-A`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ hook_event_name: 'Stop', transcript_path: agentTranscriptPath }),
@@ -218,7 +222,7 @@ describe('First-Party Plugins & Head MCP Server', () => {
     });
 
     writeFileSync(path.join(repoDir, 'ready.txt'), 'ok', 'utf8');
-    const stopAllowed = await fetch(`${orch.mcpServer.url}/internal/hook?runId=run-A`, {
+    const stopAllowed = await fetch(`${orch.mcpServer.url}/internal/hook?invocation=run-A`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ hook_event_name: 'Stop' }),

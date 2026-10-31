@@ -1,10 +1,8 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, describe, expect, it } from 'vitest';
-import { H, startOrchestrator, z } from '../../src/index.js';
+import { H, hookEndpointUrl, startOrchestrator, z } from '../../src/index.js';
 import { fileLeaseGuard } from '../../src/plugins/index.js';
 import { claudeCodeHookProtocol } from '../../src/protocols/claude-code.js';
 import { HarnessStore } from '../../src/store.js';
@@ -47,14 +45,16 @@ describe('Hook protocols', () => {
       tool_name: 'Write',
       tool_input: { file_path: '/repo/apps/edge/wallet.ts', content: 'x' },
     });
-    expect.soft(event).toStrictEqual({
+    expect.soft(event).toMatchObject({
       phase: 'pre-tool',
       intent: 'file-write',
+      toolName: 'Write',
       filePaths: ['/repo/apps/edge/wallet.ts'],
       sessionId: 'sess-9',
       transcriptPath,
-      contextTokens: 35,
+      raw: { tool_input: { content: 'x' } },
     });
+    expect.soft(claudeCodeHookProtocol.readContextTokens(transcriptPath)).toBe(35);
     expect
       .soft(claudeCodeHookProtocol.parse({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } }))
       .toMatchObject({ phase: 'pre-tool', intent: null, filePaths: [] });
@@ -79,14 +79,23 @@ describe('Hook protocols', () => {
         phase: payload.when === 'before' ? 'pre-tool' : 'stop',
         intent: payload.action === 'save' ? 'file-write' : null,
         filePaths: [String(payload.target)],
+        raw: payload,
       }),
       formatDecision: (_event, decision) => ({ ok: decision.allow, why: decision.reason ?? null }),
+      readContextTokens: () => 0,
     };
-    const orch = await startOrchestrator({ projectDir: dir, head: H.head().port(0).hookProtocol(stubProtocol) });
-    orch.mcpServer.registerRunPlugins('run-A', [fileLeaseGuard()], dir);
-    orch.mcpServer.registerRunPlugins('run-B', [fileLeaseGuard()], dir);
+    const orch = await startOrchestrator({ projectDir: dir, head: H.head().port(0) });
+    for (const runId of ['run-A', 'run-B']) {
+      orch.mcpServer.register(`inv-${runId}`, {
+        runId,
+        workDir: dir,
+        protocol: stubProtocol,
+        plugins: [fileLeaseGuard()],
+        customTools: new Map(),
+      });
+    }
     const post = (runId: string, action: string) =>
-      fetch(`${orch.mcpServer.url}/internal/hook?protocol=stub-cli&runId=${runId}`, {
+      fetch(hookEndpointUrl(orch.mcpServer.url, `inv-${runId}`), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ when: 'before', action, target: path.join(dir, 'ledger.ts') }),
@@ -95,20 +104,6 @@ describe('Hook protocols', () => {
     expect.soft(await post('run-A', 'save')).toEqual({ ok: true, why: null });
     expect.soft(await post('run-B', 'save')).toMatchObject({ ok: false, why: expect.stringContaining('run-A') });
     expect.soft(await post('run-B', 'open')).toEqual({ ok: true, why: null });
-    await orch.close();
-  });
-
-  it('grounds the Head with the configured transcript reader', async () => {
-    const dir = makeDir();
-    const orch = await startOrchestrator({
-      projectDir: dir,
-      head: H.head().port(0).transcriptReader((transcriptPath) => (transcriptPath === 'head.log' ? 42_000 : 0)),
-    });
-    const client = new Client({ name: 'reader-test', version: '1.0.0' });
-    await client.connect(new StreamableHTTPClientTransport(new URL(orch.mcpUrl)));
-    const res = await client.callTool({ name: 'harness_ground', arguments: { sessionId: 'h', transcriptPath: 'head.log' } });
-    expect(JSON.parse((res.content as any)[0].text).contextTokens).toBe(42_000);
-    await client.close();
     await orch.close();
   });
 

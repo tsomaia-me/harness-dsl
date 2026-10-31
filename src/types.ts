@@ -65,7 +65,7 @@ export interface ExecutionContext {
   readonly workDir: string;
   readonly touchedPaths: readonly string[];
   readonly store: HarnessStore;
-  readonly hookServerUrl?: string;
+  readonly hookReceiver?: HookReceiver;
   readonly signal: AbortSignal;
 }
 
@@ -91,6 +91,7 @@ export interface DriverInvokeRequest {
   readonly maxContextTokens?: number;
   readonly handoffBufferTokens?: number;
   readonly hookServerUrl?: string;
+  readonly invocationId?: string;
   readonly hookSubscriptions?: HookSubscriptions;
   readonly runId: string;
   readonly stepName: string;
@@ -145,6 +146,7 @@ export interface Driver {
   invoke(req: DriverInvokeRequest): Promise<DriverInvokeResult>;
   probeQuota?(accountId: string): Promise<QuotaPatch>;
   readonly quotaPolicy?: Partial<QuotaPolicy>;
+  readonly hookProtocol?: HookProtocol;
   readonly batch?: BatchAdapter;
 }
 
@@ -196,10 +198,11 @@ export type ToolIntent = 'file-write';
 export interface ToolEvent {
   readonly phase: ToolEventPhase;
   readonly intent: ToolIntent | null;
+  readonly toolName?: string;
   readonly filePaths: readonly string[];
   readonly sessionId?: string;
   readonly transcriptPath?: string;
-  readonly contextTokens?: number;
+  readonly raw: Readonly<Record<string, unknown>>;
 }
 
 export interface HookDecision {
@@ -218,6 +221,21 @@ export interface HookProtocol {
   buildSettings(endpoint: string, subscriptions: HookSubscriptions): Record<string, unknown>;
   parse(payload: Record<string, unknown>): ToolEvent | null;
   formatDecision(event: ToolEvent, decision: HookDecision): Record<string, unknown>;
+  readContextTokens(transcriptPath: string): number;
+}
+
+export interface HookRegistration {
+  readonly runId: string;
+  readonly workDir: string;
+  readonly protocol: HookProtocol;
+  readonly plugins: readonly AgentPlugin[];
+  readonly customTools: ReadonlyMap<string, Executable<any, any>>;
+}
+
+export interface HookReceiver {
+  readonly url: string;
+  register(invocationId: string, registration: HookRegistration): void;
+  unregister(invocationId: string): void;
 }
 
 export interface PluginContext {
