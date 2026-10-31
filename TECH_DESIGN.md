@@ -21,12 +21,18 @@
     runner.ts               # Local & Agentless SSH (ControlMaster + setsid process-group) command runner
     engine.ts               # Deterministic H.flow execution engine (step, when, branch, parallel, loop, batch, haltIf)
     mcp.ts                  # HTTP server hosting @modelcontextprotocol/sdk (Head tools) + /internal/hook receiver
+    hooks.ts                # Hook receiver path and endpoint URL shared by drivers and the MCP server
     drivers/
       index.ts              # H.drivers.* factory exports
       claude-cli.ts         # Claude Code CLI (`claude -p --output-format stream-json --json-schema`) driver
-      ai-sdk.ts             # Vercel AI SDK (`ai` + @ai-sdk/anthropic, @ai-sdk/google, @ai-sdk/openai) + Cloud Batch API driver
+      ai-sdk.ts             # Vercel AI SDK driver over a ProviderPreset
       custom.ts             # User-supplied function / command driver wrapper
       mock.ts               # Deterministic in-memory driver for unit & failure-injection tests
+    presets/                # ProviderPreset per first-party AI SDK provider (anthropic, openai, google)
+    rate-limits/            # RateLimitAdapter per header family (anthropic, openai, ietf) + Claude CLI stream events
+    pricing/                # Dated price lists per provider and the price-list PricingAdapter
+    batch/                  # BatchAdapter implementations (anthropic)
+    protocols/              # HookProtocol implementations (claude-code) and transcript readers
     plugins/
       index.ts              # Public plugin exports (`harness-dsl/plugins`)
       worktree.ts           # gitWorktreeIsolation() middleware using simple-git
@@ -44,7 +50,7 @@ The framework delegates generic infrastructure concerns to maintained MIT/Apache
 ```json
 {
   "name": "harness-dsl",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "type": "module",
   "exports": {
     ".": "./dist/index.js",
@@ -84,6 +90,8 @@ The framework delegates generic infrastructure concerns to maintained MIT/Apache
 
 ## §2. Core TypeScript Interfaces (`src/types.ts`)
 
+The core (`types`, `dsl`, `engine`, `quota`, `store`, `mcp`, `runner`, `schema`, `hooks`) names no vendor, CLI, model, header, price, tool name, port name or input field. Every one of those lives behind one of the adapter interfaces below, with first-party implementations under `presets/`, `rate-limits/`, `pricing/`, `batch/`, `protocols/` and `drivers/`. `dsl.ts` is the composition root that wires the first-party defaults, so `H.drivers.claudeCli({ configDir })` and `H.drivers.aiSdk({ provider: 'anthropic' })` stay one-liners. `test/unit/core-boundary.test.ts` enforces this.
+
 ### §2.1 `Executable<TInput, TOutput>`
 
 Every runnable descriptor (`CommandDef`, `BoundAgentSkill`, `FlowDef`) implements `Executable`:
@@ -93,11 +101,13 @@ import type { z } from 'zod';
 
 export interface ExecutionContext {
   readonly runId: string;
+  readonly iteration: number;
+  readonly stepName: string;
   readonly projectDir: string;
   readonly workDir: string;
-  readonly slotIndex: number;
-  readonly slotPorts: readonly number[];
+  readonly touchedPaths: readonly string[];
   readonly store: HarnessStore;
+  readonly hookServerUrl?: string;
   readonly signal: AbortSignal;
 }
 
@@ -110,39 +120,87 @@ export interface Executable<TInput = unknown, TOutput = unknown> {
 }
 ```
 
-### §2.2 `AccountProvider`, `Driver`, and `QuotaSnapshot`
+A command's slot index and ports come from the runner's `exec()` result, not from the context.
+
+### §2.2 Quota windows and policy
 
 ```typescript
-export interface QuotaSnapshot {
-  readonly utilization5h: number;      // 0.0 to 1.0
-  readonly utilization7d: number;      // 0.0 to 1.0
-  readonly resets5hAtMs: number | null;
-  readonly resets7dAtMs: number | null;
-  readonly cooldownUntilMs: number | null;
+export interface QuotaWindow {
+  readonly id: string;               // 'anthropic:5h', 'anthropic:7d', 'openai:requests', 'http:ratelimit', ...
+  readonly utilization: number;      // 0.0 to 1.0
+  readonly resetsAtMs: number | null;
 }
 
-export interface TokenUsage {
+export interface QuotaWindowPatch {
+  readonly id: string;
+  readonly utilization?: number;
+  readonly resetsAtMs?: number | null;
+}
+
+export interface QuotaPatch {
+  readonly windows?: readonly QuotaWindowPatch[];
+  readonly cooldownUntilMs?: number | null;
+}
+
+export interface QuotaPolicy {
+  readonly thresholds: Readonly<Record<string, number>>; // per window id
+  readonly defaultThreshold: number;                       // for windows without a threshold
+  readonly probeStalenessMs: number;
+  readonly tokenBudget: number | null;                     // null: project share is not derived from tokens
+  readonly shareResetWindowId: string | null;              // the window whose reset frees the project share
+  readonly defaultCooldownMs: number;                      // a rate limit that names no reset
+}
+```
+
+`DEFAULT_QUOTA_POLICY` is `{ thresholds: {}, defaultThreshold: 0.95, probeStalenessMs: 60_000, tokenBudget: null, shareResetWindowId: null, defaultCooldownMs: 60_000 }`. An account's effective policy is the core default, then its driver's `quotaPolicy`, then `H.account(...).quotaPolicy({...})`; thresholds merge per window. The Claude CLI driver supplies `{ thresholds: { 'anthropic:5h': 0.95, 'anthropic:7d': 0.98 }, tokenBudget: 5_000_000, shareResetWindowId: 'anthropic:7d' }`.
+
+### §2.3 Usage, pricing and rate limits
+
+```typescript
+export interface TokenCounts {
   readonly inputTokens: number;
   readonly cachedInputTokens: number;
   readonly outputTokens: number;
-  readonly actualCostUsd: number;
-  readonly equivalentCostUsd: number;
 }
 
+export interface TokenUsage extends TokenCounts {
+  readonly actualCostUsd: number | null;      // null: the model is unpriced
+  readonly equivalentCostUsd: number | null;
+}
+
+export interface PricingAdapter {
+  estimate(modelId: string, usage: TokenCounts, atMs: number): number | null;
+}
+
+export interface RateLimitAdapter {
+  fromHeaders(headers: Readonly<Record<string, string | undefined>>, nowMs: number): QuotaPatch;
+}
+```
+
+Drivers throw `RateLimitedError(accountId, message, quota: QuotaPatch)` for a rate limit; the skill runner stores the patch and, when it names no `cooldownUntilMs`, cools the account down for `quotaPolicy.defaultCooldownMs`.
+
+### §2.4 Drivers and accounts
+
+```typescript
 export interface DriverInvokeRequest {
   readonly accountId: string;
   readonly modelId: string;
   readonly modelOptions: Record<string, unknown>;
+  readonly pricing?: PricingAdapter;          // H.model(...).pricing(adapter)
   readonly systemPrompt: string;
   readonly userPrompt: string;
   readonly outputJsonSchema: Record<string, unknown>;
   readonly workDir: string;
   readonly allowedTools?: readonly string[];
+  readonly customTools?: ReadonlyMap<string, Executable<any, any>>;
   readonly maxContextTokens?: number;
+  readonly handoffBufferTokens?: number;      // agent.handoffBuffer(tokens), default 30_000
   readonly hookServerUrl?: string;
+  readonly hookSubscriptions?: HookSubscriptions;
   readonly runId: string;
   readonly stepName: string;
   readonly sessionId?: string;
+  readonly resumeSession?: boolean;
   readonly inactivityTimeoutMs: number;
   readonly signal: AbortSignal;
 }
@@ -152,11 +210,8 @@ export interface DriverInvokeResult {
   readonly rawText: string;
   readonly sessionId: string;
   readonly usage: TokenUsage;
-  readonly handoffRequested?: {
-    summary: string;
-    remainingWork: string[];
-  };
-  readonly quotaHint?: Partial<QuotaSnapshot>;
+  readonly handoffRequested?: { readonly summary: string; readonly remainingWork: readonly string[] };
+  readonly quotaHint?: QuotaPatch;
 }
 
 export interface BatchItemRequest {
@@ -176,17 +231,15 @@ export interface BatchItemResult {
 
 export interface BatchAdapter {
   submit(items: readonly BatchItemRequest[], modelId: string, opts: Record<string, unknown>): Promise<{ batchId: string }>;
-  poll(batchId: string): Promise<{
-    status: 'running' | 'completed' | 'failed';
-    results?: readonly BatchItemResult[];
-  }>;
+  poll(batchId: string): Promise<{ status: 'running' | 'completed' | 'failed'; results?: readonly BatchItemResult[] }>;
   cancel?(batchId: string): Promise<void>;
 }
 
 export interface Driver {
-  readonly kind: 'claude-cli' | 'ai-sdk' | 'custom' | 'mock';
+  readonly kind: string;
   invoke(req: DriverInvokeRequest): Promise<DriverInvokeResult>;
-  probeQuota?(accountId: string): Promise<Partial<QuotaSnapshot>>;
+  probeQuota?(accountId: string): Promise<QuotaPatch>;
+  readonly quotaPolicy?: Partial<QuotaPolicy>;
   readonly batch?: BatchAdapter;
 }
 
@@ -194,6 +247,7 @@ export interface ResolvedAccount {
   readonly accountId: string;
   readonly driver: Driver;
   readonly maxQuotaShare: number;
+  readonly quotaPolicy: QuotaPolicy;
 }
 
 export interface AccountProvider {
@@ -204,14 +258,54 @@ export interface AccountProvider {
 }
 ```
 
----
+### §2.5 Hooks and plugins
+
+```typescript
+export type ToolEventPhase = 'pre-tool' | 'post-tool' | 'stop';
+export type ToolIntent = 'file-write';
+
+export interface ToolEvent {
+  readonly phase: ToolEventPhase;
+  readonly intent: ToolIntent | null;      // null: a tool the protocol does not classify
+  readonly filePaths: readonly string[];
+  readonly sessionId?: string;
+  readonly transcriptPath?: string;
+  readonly contextTokens?: number;
+}
+
+export interface HookDecision {
+  readonly allow: boolean;
+  readonly reason?: string;
+  readonly additionalContext?: string;
+}
+
+export interface HookSubscriptions {
+  readonly preToolIntents: readonly ToolIntent[];
+  readonly stop: boolean;
+}
+
+export interface HookProtocol {
+  readonly name: string;
+  buildSettings(endpoint: string, subscriptions: HookSubscriptions): Record<string, unknown>;
+  parse(payload: Record<string, unknown>): ToolEvent | null;
+  formatDecision(event: ToolEvent, decision: HookDecision): Record<string, unknown>;
+}
+
+export interface AgentPlugin {
+  readonly name: string;
+  readonly preTool?: PluginHandler & { readonly intents: readonly ToolIntent[] };
+  readonly stop?: PluginHandler;
+}
+```
+
+The driver that spawns an agent owns its `HookProtocol`. The MCP server receives every callback on `/internal/hook?protocol=<name>&runId=<id>`, parses it with the protocol registered on the Head under that name (`H.head().hookProtocol(p)`; `claude-code` is registered by default and used when the URL names none), runs the run's plugins whose subscription matches the event, and answers with `protocol.formatDecision(...)`.
 
 ## §3. SQLite Schema (`src/schema.ts`)
 
-State is persisted in `<projectDir>/.harness/runtime.db` using `better-sqlite3` in `WAL` mode (`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;`) and `drizzle-orm/better-sqlite3`.
+State is persisted in `<projectDir>/.harness/runtime.db` using `better-sqlite3` in `WAL` mode (`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;`) and `drizzle-orm/better-sqlite3`. The schema version is kept in `PRAGMA user_version` (`SCHEMA_VERSION = 1`). A database written by another version is renamed to `runtime.db.v<old>.bak` (with a timestamp suffix if that name is taken) and a fresh one is created; nothing is migrated in place.
 
 ```typescript
-import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
+import { integer, primaryKey, real, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 export const workflowRuns = sqliteTable('workflow_runs', {
   id: text('id').primaryKey(),
@@ -246,8 +340,8 @@ export const invocations = sqliteTable('invocations', {
   inputTokens: integer('input_tokens').notNull().default(0),
   cachedInputTokens: integer('cached_input_tokens').notNull().default(0),
   outputTokens: integer('output_tokens').notNull().default(0),
-  actualCostUsd: real('actual_cost_usd').notNull().default(0),
-  equivalentCostUsd: real('equivalent_cost_usd').notNull().default(0),
+  actualCostUsd: real('actual_cost_usd'),          // null: unpriced
+  equivalentCostUsd: real('equivalent_cost_usd'),  // null: unpriced
   status: text('status').$type<'running' | 'pass' | 'fail' | 'blocked' | 'timeout'>().notNull(),
   outputJson: text('output_json'),
   errorText: text('error_text'),
@@ -255,15 +349,23 @@ export const invocations = sqliteTable('invocations', {
 
 export const accountQuotas = sqliteTable('account_quotas', {
   accountId: text('account_id').primaryKey(),
-  utilization5h: real('utilization_5h').notNull().default(0),
-  utilization7d: real('utilization_7d').notNull().default(0),
   projectShareUsed: real('project_share_used').notNull().default(0),
   windowTokensUsed: integer('window_tokens_used').notNull().default(0),
-  resets5hAtMs: integer('resets_5h_at_ms'),
-  resets7dAtMs: integer('resets_7d_at_ms'),
   cooldownUntilMs: integer('cooldown_until_ms'),
-  updatedAtMs: integer('updated_at_ms').notNull(),
+  probedAtMs: integer('probed_at_ms'),
+  acquiredAtMs: integer('acquired_at_ms'),
 });
+
+export const accountQuotaWindows = sqliteTable(
+  'account_quota_windows',
+  {
+    accountId: text('account_id').notNull(),
+    windowId: text('window_id').notNull(),
+    utilization: real('utilization').notNull().default(0),
+    resetsAtMs: integer('resets_at_ms'),
+  },
+  (table) => [primaryKey({ columns: [table.accountId, table.windowId] })],
+);
 
 export const fileLeases = sqliteTable('file_leases', {
   pattern: text('pattern').primaryKey(),
@@ -281,59 +383,57 @@ export const headSessions = sqliteTable('head_sessions', {
 });
 ```
 
----
-
 ## §4. Account Pool & Reactive Quota Engine (`src/quota.ts`)
 
 ### §4.1 Quota Eligibility Check
 
-When `pool.acquireAccount(store)` is called:
+When `pool.acquireAccount(store)` is called, each member account is evaluated against its effective `QuotaPolicy` (§2.2), which is also registered with the store so token usage is charged against the right budget:
 
-1. **Refresh Expired Windows:** For each member `account`, if `now >= resets5hAtMs`, reset `utilization5h = 0`; if `now >= resets7dAtMs`, reset `utilization7d = 0` and `projectShareUsed = 0`; if `now >= cooldownUntilMs`, clear `cooldownUntilMs = null`.
-2. **Optional Probe:** If `account.driver.probeQuota` exists and `now - updatedAtMs > 60_000`, call `probeQuota(account.id)` and merge the returned snapshot into `account_quotas`.
+1. **Refresh Expired Windows:** Every window with `now >= resetsAtMs` is reset to `utilization = 0, resetsAtMs = null`. If it is the policy's `shareResetWindowId`, `projectShareUsed` and `windowTokensUsed` reset to `0`. If `now >= cooldownUntilMs`, the cooldown is cleared.
+2. **Optional Probe:** If the driver has `probeQuota` and `now - probedAtMs > policy.probeStalenessMs` (or it was never probed), call it and merge the returned windows. If the probe shows the share window's utilization below the stored value (an early or bonus reset), `projectShareUsed` and `windowTokensUsed` reset to `0`. Acquiring an account updates `acquiredAtMs`, never `probedAtMs`, so a busy account is still re-probed.
 3. **Effective Cap Calculation:**
-   `effectiveShareCap = Math.min(account.maxQuotaShareValue, pool.maxQuotaShareValue)`
+   `effectiveShareCap = Math.min(account share override ?? account.maxQuotaShareValue, pool.maxQuotaShareValue)`
 4. **Filter Eligible Accounts:** An account is eligible if and only if:
    - `cooldownUntilMs === null || cooldownUntilMs <= now`
    - `projectShareUsed < effectiveShareCap`
-   - `utilization5h < 0.95` and `utilization7d < 0.98`
-5. **Apply Reserve Rule:** If `pool.reserve` specifies `{ minFreeAccounts, maxBurstUtilization }`, ensure at least `minFreeAccounts` remain below `maxBurstUtilization` unless no other account is available.
+   - every window has `utilization < (policy.thresholds[window.id] ?? policy.defaultThreshold)`
+5. **Apply Reserve Rule:** If `pool.reserve` specifies `{ minFreeAccounts, maxBurstUtilization }`, eligible accounts whose peak window utilization is below `maxBurstUtilization` form the low-usage set. When it holds more than `minFreeAccounts` accounts, only it is used; otherwise the pool routes to its fallback, or uses every eligible account when it has none.
 6. **Sort by Strategy:**
-   - `'drain-soonest-expiring'`: Sort ascending by `resets7dAtMs ?? Infinity`, breaking ties by `utilization5h ASC`.
-   - `'least-used'`: Sort ascending by `Math.max(utilization5h, projectShareUsed)`.
+   - `'drain-soonest-expiring'`: Sort ascending by the reset time of the share window (`Infinity` when unknown), breaking ties by peak window utilization ascending.
+   - `'least-used'`: Sort ascending by `Math.max(peak window utilization, projectShareUsed)`.
    - `'priority'`: Keep declaration order.
-   - `'round-robin'`: Sort ascending by `updatedAtMs`.
-7. **Fallback:** If zero pool accounts are eligible and `pool.fallbackAccount` is configured, return `pool.fallbackAccount.acquireAccount(store)`. Otherwise, if an account's `cooldownUntilMs` or `resets5hAtMs` is known, throw a typed `QuotaExhaustedError(nextAvailableAtMs)`.
+   - `'round-robin'`: Sort ascending by `acquiredAtMs`.
+7. **Fallback:** If zero pool accounts are eligible and `pool.fallbackAccount` is configured, return `pool.fallbackAccount.acquireAccount(store)`. Otherwise throw `QuotaExhaustedError(nextAvailableAtMs)`, where `nextAvailableAtMs` is the soonest future cooldown or window reset.
 
-### §4.2 Reactive Rate-Limit & Header Parsing
+Token usage from every finished invocation adds to `windowTokensUsed`; when the policy has a `tokenBudget`, it also adds `tokens / tokenBudget` to `projectShareUsed` (capped at `1`).
 
-Whenever any driver receives a response or a `429` rate-limit error:
-- If HTTP headers include `anthropic-ratelimit-unified-5h-utilization`, `anthropic-ratelimit-unified-7d-utilization`, or `retry-after`, update `account_quotas` immediately.
-- If `claude -p` emits a rate-limit error event containing a reset timestamp, parse the timestamp into `cooldownUntilMs` and retry the invocation automatically on the next eligible account in the pool.
+### §4.2 Reactive Rate-Limit Discovery
 
----
+- **HTTP drivers:** The AI SDK driver passes response headers on every success and on a `429` to its `RateLimitAdapter`. First-party adapters: `anthropicRateLimits` (`anthropic-ratelimit-unified-{5h,7d}-*` → `anthropic:5h`/`anthropic:7d`, `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-*` → `anthropic:<kind>`), `openaiRateLimits` (`x-ratelimit-{limit,remaining,reset}-{requests,tokens}` with `6m0s`/`500ms` durations → `openai:<kind>`, `retry-after-ms`), and `ietfRateLimits` (`RateLimit-Limit/Remaining/Reset` → `http:ratelimit`, `Retry-After` as seconds or HTTP-date). `composeRateLimits(...)` merges adapters, keeping the latest window per id and the latest cooldown. `generateText` retries a `429` itself and then throws `RetryError`; the driver reads the status and headers from its `lastError`.
+- **Claude CLI driver:** Reads the stream-json `rate_limit_event` (`rate_limit_info.unifiedWindows.{five_hour,seven_day}.{utilization,resetsAt}` → `anthropic:5h`/`anthropic:7d`) on every run and returns it as the `quotaHint`. A turn counts as rate limited only when an error event or error result says so (`api_error_status: 429` or rate-limit text in the error), or when a run that produced no output exits non-zero with rate-limit text on stderr. The cooldown is the rejected window's `resetsAt`, else a reset time parsed from the error text, else the policy default.
 
 ## §5. Driver Implementations (`src/drivers/`)
 
 ### §5.1 Claude CLI Driver (`src/drivers/claude-cli.ts`)
 
-Spawns the `claude` CLI in non-interactive streaming mode using `execa`.
+Spawns the `claude` CLI in non-interactive streaming mode.
 
 1. **Ephemeral Hook Settings Generation:**
-   Writes `/tmp/harness-settings-<runId>-<stepName>.json` containing only the internal hook endpoints for that specific step:
+   Writes `<tmpdir>/harness-cli-settings/settings-<runId>-<stepName>-<uuid>.json` from `claudeCodeHookProtocol.buildSettings(endpoint, req.hookSubscriptions)`, where `endpoint` is `hookEndpointUrl(hookServerUrl, 'claude-code', runId)`:
    ```json
    {
      "hooks": {
        "PreToolUse": [{
-         "matcher": "Edit|Write",
-         "hooks": [{ "type": "command", "command": "curl -sS -X POST http://127.0.0.1:<port>/internal/hook?event=PreToolUse&runId=<runId> -d @-" }]
+         "matcher": "Edit|Write|MultiEdit",
+         "hooks": [{ "type": "command", "command": "curl -sS -X POST \"http://127.0.0.1:<port>/internal/hook?protocol=claude-code&runId=<runId>\" -H \"content-type: application/json\" --data-binary @-" }]
        }],
        "Stop": [{
-         "hooks": [{ "type": "command", "command": "curl -sS -X POST http://127.0.0.1:<port>/internal/hook?event=Stop&runId=<runId> -d @-" }]
+         "hooks": [{ "type": "command", "command": "<same curl command>" }]
        }]
      }
    }
    ```
+   `PreToolUse` is written when a plugin subscribes to the `file-write` intent, `Stop` when a plugin has a stop handler.
 2. **CLI Arguments:**
    ```bash
    claude -p \
@@ -342,7 +442,7 @@ Spawns the `claude` CLI in non-interactive streaming mode using `execa`.
      --output-format stream-json \
      --verbose \
      --json-schema '<JSON.stringify(req.outputJsonSchema)>' \
-     --settings /tmp/harness-settings-<runId>-<stepName>.json \
+     --settings <settings file> \
      --append-system-prompt "<req.systemPrompt + filteredLessons>" \
      --allowedTools "<req.allowedTools.join(',')>" \
      --strict-mcp-config \
@@ -350,19 +450,37 @@ Spawns the `claude` CLI in non-interactive streaming mode using `execa`.
    ```
    Environment includes `{ ...process.env, CLAUDE_CONFIG_DIR: configDir }`.
 3. **Real-Time Stream Monitoring (`stdout` line-by-line JSONL):**
-   - Resets the `inactivityTimeoutMs` watchdog timer on every JSONL line. If the timer fires, kills the process tree via `treeKill(child.pid, 'SIGKILL')` and throws `InactivityTimeoutError`.
+   - Resets the `inactivityTimeoutMs` watchdog timer on every JSONL line. If the timer fires, kills the process tree and throws `InactivityTimeoutError`.
    - Reads `entry.message?.usage` on every assistant message:
      `totalContext = input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`.
-   - **Context Ceiling Guard:** If `req.maxContextTokens` is set and `totalContext >= req.maxContextTokens - 30_000`, flags the run for handoff: once the current turn finishes (or by resuming with a 1-turn handoff prompt), captures `{ summary, remainingWork }` and spawns a fresh session on the same `workDir` with the handoff summary.
-   - Extracts the final `result` event's `structured_output` (or parses the final assistant JSON block).
+   - **Context Ceiling Guard:** If `req.maxContextTokens` is set and `totalContext >= req.maxContextTokens - req.handoffBufferTokens`, flags the run for handoff: once the current turn finishes, resumes it with a 1-turn handoff prompt, captures `{ summary, remainingWork }` and spawns a fresh session on the same `workDir` with the handoff summary.
+   - Reads `rate_limit_event` lines (§4.2).
+   - Extracts the final `result` event's `structured_output` (or parses the final assistant JSON block), and its `total_cost_usd` as the subscription-equivalent cost. When the CLI reports no cost, the cost is `(req.pricing ?? anthropicPricing).estimate(...)`. The actual cost is `0`.
 
 ### §5.2 AI SDK & Cloud Batch Driver (`src/drivers/ai-sdk.ts`)
 
-1. **Real-Time Calls:**
-   Uses Vercel AI SDK's `generateText` / `Output.object({ schema })` across `@ai-sdk/anthropic`, `@ai-sdk/google`, and `@ai-sdk/openai`. When `cachePrefix: true` is set on an Anthropic model, attaches `providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } }` to the system message.
-2. **Cloud Batch Adapter (`batch`):**
-   - For `provider === 'anthropic'`: Submits batch items to `POST https://api.anthropic.com/v1/messages/batches` with `output_config.format` (or single tool schema) matching `outputJsonSchema` and ephemeral cache markers on shared system prompts. Polls `GET /v1/messages/batches/:id` and streams `.results_url` JSONL on completion.
-   - For `provider === 'google'` / `'openai'`: Uses the respective Batch API endpoints, or falls back to bounded local concurrency via `p-queue` if `useCloudBatch: false`.
+1. **Provider Presets:**
+   `H.drivers.aiSdk({ provider })` takes `'anthropic' | 'openai' | 'google'` or a user `ProviderPreset`:
+   ```typescript
+   export interface ProviderPreset {
+     readonly name: string;
+     readonly apiKeyEnv?: string;
+     createModel(modelId: string, connection: ProviderConnection): LanguageModel;
+     mapModelOptions?(options: Record<string, unknown>): ProviderOptions | undefined;
+     readonly rateLimits?: RateLimitAdapter;
+     readonly pricing?: PricingAdapter;
+     createBatch?(connection: { apiKey: () => string; baseURL?: string; fetch?: typeof fetch }): BatchAdapter;
+   }
+   ```
+   `anthropicPreset`, `openaiPreset` and `googlePreset` carry the API key variable, the `@ai-sdk/*` factory, the model-option mapping (`effort`, `thinkingBudget`, `cachePrefix`), the rate-limit adapter and the price list. A user preset makes any AI SDK model work (Bedrock, Mistral, OpenRouter, Ollama); it gets no first-party pricing (cost `null`) and needs an API key only when it names one. The driver options `rateLimits`, `pricing` and `batch?: BatchAdapter | false` override the preset.
+2. **Real-Time Calls:**
+   Uses `generateText` with `Output.object({ schema })` and the preset's provider options. Cost is `(req.pricing ?? driver pricing).estimate(...)`, and actual equals equivalent.
+3. **Cloud Batch Adapter (`batch/anthropic.ts`):**
+   - `anthropicBatchAdapter({ apiKey, pricing, baseURL?, fetch?, maxTokens = 16_000, apiVersion = '2023-06-01', discount = 0.5, structuredOutput = 'output-format' })` submits to `POST <baseURL>/messages/batches`, polls `GET /messages/batches/:id` and reads `results_url` JSONL on completion.
+   - `structuredOutput: 'output-format'` sends `output_config.format = { type: 'json_schema', schema }` and parses the text block. `'forced-tool'` sends a single `structured_output` tool with forced `tool_choice` and parses the `tool_use` input, for models without structured outputs. Current models (Opus 5.5, Sonnet 5.5, Fable 5.1) reject forced `tool_choice`.
+   - The model's `effort` goes to `output_config.effort`. The shared system prompt carries an ephemeral cache marker.
+   - Item cost is priced by the result's `model`; the actual cost is `equivalent * discount`.
+   - OpenAI and Google batch adapters are not implemented (planned for 0.4.0). Those drivers run batch steps through the bounded local queue (`p-queue`).
 
 ### §5.3 Schema Validation & Self-Correction Loop
 
@@ -382,8 +500,8 @@ In `BoundAgentSkill.execute(input, ctx)`:
 
 Each `Runner` instance holds a `PQueue({ concurrency: maxConcurrentSlots })` and a free-slot bitmask `[0 .. maxConcurrentSlots - 1]`.
 When a job acquires slot `k`:
-- `slotPorts` are `[slotPortBase + k * 10, ..., slotPortBase + k * 10 + 9]`.
-- Injected into command environment as `HARNESS_SLOT=k`, `PORT=${slotPorts[0]}`, `PORT_API=${slotPorts[0]}`, `PORT_WEB=${slotPorts[1]}`, `PORT_ADMIN=${slotPorts[2]}`.
+- `slotPorts` are `[slotPortBase + k * portsPerSlot, ..., slotPortBase + (k + 1) * portsPerSlot - 1]` (`portsPerSlot` defaults to `10`).
+- Injected into the command environment as `HARNESS_SLOT=k` and `PORT=${slotPorts[0]}`, plus whatever `slotEnv(k, slotPorts)` returns (for example a project's `PORT_API` / `PORT_WEB` names), plus the command's own env.
 
 ### §6.2 Agentless SSH Execution & Process-Group Containment
 
@@ -410,6 +528,7 @@ For `H.runner.ssh(id, opts)`:
 
 1. **Initialization:**
    - Validates `rawInput` against `flowDef.inputSchema`.
+   - Takes the run's ticket id and touched paths from `FlowRunOptions.ticketId / touchedPaths`, else from `H.flow(...).identify({ ticketId, touchedPaths })`, else none. The engine reads no input field by name.
    - Inserts a `workflow_runs` row with status `'running'` and triggers `store.projectBoard()`.
    - Runs any attached flow middlewares (`flowDef.middlewares`, such as `gitWorktreeIsolation`), which wrap the execution in a `try / finally` block.
 2. **Node Execution:**
@@ -460,12 +579,11 @@ Uses `McpServer` and `StreamableHTTPServerTransport` from `@modelcontextprotocol
 
 ### §8.2 Internal Hook Receiver (`POST /internal/hook`)
 
-Handles Claude Code hook callbacks from both workflow agents and `Head`:
-1. **`Head` Context Tracking:** When `session_id` matches the active `Head` session and `transcript_path` is present, reads the tail 64 KB of `transcript_path`, sums the last turn's token usage, updates `head_sessions.contextTokens`, and if `contextTokens >= headDef.contextNoticeThreshold`, returns `additionalContext` instructing `Head` to call `harness_handoff`.
-2. **`PreToolUse` (`fileLeaseGuard` plugin):** Checks `tool_input.file_path` against `file_leases` in SQLite using `picomatch`. If no other run holds a lease on the file, acquires the lease for `runId` and allows the tool call; if another run holds the lease, returns `{ permissionDecision: 'deny', permissionDecisionReason: '...' }`.
-3. **`Stop` (`stopCommandHook` plugin):** Runs the configured `H.command` (e.g. `TouchedChecks`). If `passed === false`, returns `{ decision: 'block', reason: summary }` so the Builder fixes the issue inside the same turn.
-
----
+Handles hook callbacks from both workflow agents and `Head`. The `protocol` query parameter picks the `HookProtocol` (§2.5), and `protocol.parse(payload)` turns the body into a `ToolEvent`:
+1. **Context Tracking:** With a `runId`, `event.contextTokens` updates that run's context usage on the board. Without one, the event is the Head's: it updates `head_sessions`, and if `contextTokens >= headDef.contextNoticeThreshold`, the answer carries `additionalContext` instructing `Head` to call `harness_handoff`. The Head's transcript format comes from `H.head().transcriptReader(fn)` (default: Claude Code JSONL) wherever the server reads a transcript outside a hook (`harness_ground`, MCP results).
+2. **`pre-tool` (`fileLeaseGuard` plugin):** For plugins subscribed to the event's intent, checks each of `event.filePaths` against `file_leases` using `picomatch`. If no other run holds a lease on the file, acquires it for `runId` and allows; if another run holds it, the answer denies with a reason.
+3. **`stop` (`stopCommandHook` plugin):** Runs the configured `H.command`. By default the command's output must be `{ passed: boolean, summary?: string }`; any other output needs a `verdict(output)` option. On a failed check, the answer blocks with the summary so the agent fixes the issue inside the same turn.
+4. **Answers:** `protocol.formatDecision(event, decision)`. For Claude Code: a denied `PreToolUse` answers `hookSpecificOutput.permissionDecision: 'deny'`, a blocked `Stop` answers `{ decision: 'block', reason }`, and an allow answers `{}` so Claude Code's own permission checks still apply.
 
 ## §9. Verification & End-to-End Test Plan
 
@@ -476,7 +594,12 @@ Run via `pnpm test`:
 3. **`engine-combinators.test.ts`:** Tests `.loop()` convergence, dispute arbitration branching, `.haltIf()` pause and `resolveBlocker()` resume, and Zod output validation auto-retry on malformed LLM output using `H.drivers.mock()`.
 4. **`plugins-and-leases.test.ts`:** Tests `fileLeaseGuard()` dynamic lease acquisition and cross-run conflict denial, `gitWorktreeIsolation()` branch creation and cleanup, and `stopCommandHook()` blocking behavior.
 5. **`runner-process-cleanup.test.ts`:** Spawns a command that forks a background child process, triggers an inactivity timeout, and asserts the child PID is terminated.
-6. **`store-and-projections.test.ts`:** Verifies SQLite persistence, `.harness/lessons.jsonl` role+glob filtering, and `.harness/BOARD.md` / `.harness/TELEMETRY.md` generation.
+6. **`store-and-projections.test.ts`:** Verifies SQLite persistence, schema-version backup, `.harness/lessons.jsonl` role+glob filtering, and `.harness/BOARD.md` (one column per quota window) / `.harness/TELEMETRY.md` generation.
+7. **`rate-limits.test.ts`:** Header fixtures per rate-limit adapter, the Claude CLI `rate_limit_event` (fixture captured from Claude Code 2.1.309), rate-limit detection on failed turns only, `RetryError` unwrapping, and the policy default cooldown.
+8. **`pricing.test.ts`:** Price-list matching (platform prefixes, dated snapshots, longest id, version boundaries), long-context tiers, scheduled price changes, the CLI-reported cost, the per-model override, and unpriced telemetry.
+9. **`presets-and-batch.test.ts`:** A user preset end to end, first-party model-option mapping, and the Anthropic batch adapter in both structured-output modes.
+10. **`hook-protocol.test.ts`:** The Claude Code protocol round trip, `fileLeaseGuard` through a non-Claude protocol, the Head transcript reader, and the handoff buffer.
+11. **`core-boundary.test.ts`:** Fails when a core file imports an adapter directory or names a provider, CLI or project.
 
 ### §9.2 Live End-to-End Suite (`test/e2e/`)
 Run via `node --env-file=.env pnpm test:e2e` (secrets are loaded by Node into `process.env` and never read or printed by any agent):

@@ -8,9 +8,9 @@ Strongly-typed TypeScript orchestration DSL (`H.*`) for composing deterministic 
 
 - **Unified `Executable<TInput, TOutput>` Contract** — Deterministic commands (`H.command`), bound agent skills (`Agent.run(Skill)`), and sub-flows (`H.flow`) share a single Zod-validated interface and compose interchangeably across all flow combinators.
 - **Strongly-Typed Flow Combinators** — `.step()`, `.when()`, `.branch()`, `.parallel()`, `.loop()`, `.batch()`, `.haltIf()`, `.onError()`, and `.finally()` propagate step output types through `ctx.steps` and `ctx.prev` at compile time.
-- **Reactive Multi-Account Quota Pools (`H.pool`)** — Pool multiple Claude CLI subscription accounts (`CLAUDE_CONFIG_DIR`) and API keys (`@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/openai`) with per-account and per-pool quota share ceilings (`maxQuotaShare`), automatic 5h/7d reset window tracking, 429 cooldown failover, reserve thresholds, and API fallback.
+- **Reactive Multi-Account Quota Pools (`H.pool`)** — Pool multiple Claude CLI subscription accounts (`CLAUDE_CONFIG_DIR`) and API keys (`@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/openai`) with per-account and per-pool quota share ceilings (`maxQuotaShare`), provider-neutral quota windows (Claude 5h/7d, OpenAI requests/tokens, IETF `RateLimit-*`) read from headers and CLI rate-limit events, per-window thresholds via `.quotaPolicy()`, 429 cooldown failover, reserve thresholds, and API fallback.
 - **50% Discount Cloud Batching (`H.batch`)** — Automatically routes multi-item batch steps to the Anthropic Message Batches API (`/v1/messages/batches`) with prompt caching when backed by an `ai-sdk` Anthropic driver, or executes concurrently via `p-queue` for CLI/command steps.
-- **Process-Group & SSH Containment (`H.runner`)** — Local and agentless SSH runners (`ControlMaster` multiplexing + `setsid` process groups) with deterministic per-slot port allocation (`PORT`, `PORT_API`, `PORT_WEB`), inactivity watchdogs, and remote CPU/disk pre-flight health checks.
+- **Process-Group & SSH Containment (`H.runner`)** — Local and agentless SSH runners (`ControlMaster` multiplexing + `setsid` process groups) with deterministic per-slot port allocation (`HARNESS_SLOT`, `PORT`, plus your own names through `slotEnv`), inactivity watchdogs, and remote CPU/disk pre-flight health checks.
 - **Scoped Institutional Memory (`.harness/lessons.jsonl`)** — Append-only JSONL lesson store with Jaccard similarity deduplication, filtered automatically by agent role and `picomatch` file globs before prompt injection.
 - **First-Party Plugins (`harness-dsl/plugins`)** — Git worktree isolation per run (`gitWorktreeIsolation`), cross-run exclusive file leases (`fileLeaseGuard`), and mechanical verification gates on agent completion (`stopCommandHook`).
 - **Streamable HTTP MCP Server (`H.head` & `startOrchestrator`)** — Exposes live queue, blocker resolution, ticket CRUD, lesson management, quota share controls, telemetry, and custom agent/command tools to your interactive Claude Code Head session over `/mcp`.
@@ -86,6 +86,7 @@ const Auditor = H.agent('auditor')
 
 const TicketFlow = H.flow('ticket-flow')
   .input(z.object({ id: z.string(), instructions: z.string(), touches: z.array(z.string()) }))
+  .identify({ ticketId: (ticket) => ticket.id, touchedPaths: (ticket) => ticket.touches })
   .use(gitWorktreeIsolation({ baseBranch: 'main', cleanupOnSuccess: true }))
   .loop({
     maxIterations: 3,
@@ -140,20 +141,21 @@ const orchestrator = await startOrchestrator({
 
 ### 1. Accounts, Pools & Models
 
-- **`H.drivers.claudeCli(opts)`**: Spawns `claude -p --output-format stream-json --json-schema` with isolated `configDir` (`CLAUDE_CONFIG_DIR`) or `CLAUDE_CODE_OAUTH_TOKEN`, automatic `--resume` on schema validation retry, and 1-turn context-ceiling handoff extraction when `maxContextTokens` is approached.
-- **`H.drivers.aiSdk(opts)`**: Calls `@ai-sdk/anthropic`, `@ai-sdk/google`, or `@ai-sdk/openai` with structured output (`Output.object`), prompt caching (`cachePrefix`), reasoning effort/thinking budgets, and Anthropic Cloud Batch support (`useCloudBatch: true` by default for `anthropic`).
+- **`H.drivers.claudeCli(opts)`**: Spawns `claude -p --output-format stream-json --json-schema` with isolated `configDir` (`CLAUDE_CONFIG_DIR`) or `CLAUDE_CODE_OAUTH_TOKEN`, automatic `--resume` on schema validation retry, 1-turn context-ceiling handoff extraction when `maxContextTokens - handoffBuffer` is reached, live 5h/7d windows from the CLI's `rate_limit_event`, and the CLI-reported cost as the subscription-equivalent value.
+- **`H.drivers.aiSdk(opts)`**: Calls any Vercel AI SDK model with structured output (`Output.object`). `provider` is `'anthropic' | 'openai' | 'google'` or your own `ProviderPreset` (`{ name, createModel, apiKeyEnv?, mapModelOptions?, rateLimits?, pricing?, createBatch? }`). First-party presets map `cachePrefix`, `effort` and `thinkingBudget`, parse their provider's rate-limit headers, and price tokens from dated price lists. Anthropic Cloud Batch is on by default; `batch: false` turns it off, and `anthropicBatchAdapter({ ... })` configures `maxTokens`, `apiVersion`, `discount` and `structuredOutput`.
 - **`H.drivers.custom(opts)` / `H.drivers.mock(opts)`**: Custom or deterministic test drivers.
 - **`H.account(id, driver).maxQuotaShare(0..1)`**: Wraps a driver with a per-account quota ceiling.
+- **`H.account(id, driver).quotaPolicy({ thresholds?, defaultThreshold?, probeStalenessMs?, tokenBudget?, shareResetWindowId?, defaultCooldownMs? })`**: Overrides the driver's quota policy. Without a `tokenBudget`, project share is not derived from token use.
 - **`H.pool(id, accounts)`**:
   - `.strategy('drain-soonest-expiring' | 'least-used' | 'round-robin' | 'priority')`
   - `.maxQuotaShare(0..1)`
   - `.reserve({ minFreeAccounts, maxBurstUtilization })`
   - `.fallback(accountProvider)`
-- **`H.model(accountOrPool, modelId, options?)`**: Binds a model identifier and provider options (`{ effort, thinkingBudget, cachePrefix }`) to an account or pool.
+- **`H.model(accountOrPool, modelId, options?)`**: Binds a model identifier and provider options (`{ effort, thinkingBudget, cachePrefix }`) to an account or pool. `.pricing(adapter)` overrides how its tokens are priced; a model no price list knows is recorded as unpriced.
 
 ### 2. Runners & Commands
 
-- **`H.runner.local(opts?)`**: Concurrency-slotted local process runner with deterministic port allocation (`slotPortBase + slot * 10`) and process-tree kill on timeout or inactivity.
+- **`H.runner.local(opts?)`**: Concurrency-slotted local process runner with deterministic port allocation (`slotPortBase + slot * portsPerSlot`, default 10 ports per slot), `HARNESS_SLOT` / `PORT` plus `slotEnv(slot, ports)` names in each command's env, and process-tree kill on timeout or inactivity.
 - **`H.runner.ssh(id, opts)`**: Agentless remote SSH runner using OpenSSH `ControlMaster` multiplexing, remote `setsid` process groups, pre-flight CPU load and disk space checks (`RunnerLoadHighError`, `RunnerDiskLowError`), and `syncGitRef()` worktree pushing.
 - **`H.command(name)`**:
   - `.input(zodSchema)` / `.output(zodSchema)`
@@ -170,23 +172,24 @@ const orchestrator = await startOrchestrator({
   - `.maxRetries(n)`
 - **`H.agent(name)`**:
   - `.model(modelDef)`
-  - `.maxContextTokens(n)` / `.inactivityTimeoutMs(ms)`
+  - `.maxContextTokens(n)` / `.handoffBuffer(tokens)` (default 30_000) / `.inactivityTimeoutMs(ms)`
   - `.prompt(text)` / `.promptFile(filePath)`
   - `.tools(['Read', 'Edit', ...])` — Built-in tool allowlist.
   - `.tool(name, executable)` — Attaches any `Executable` (command, agent skill, or flow) as an MCP tool callable by the agent.
-  - `.use(plugin)` — Attaches `PreToolUse` / `PostToolUse` / `Stop` hook plugins.
+  - `.use(plugin)` — Attaches hook plugins (`preTool: { intents, handle }` / `stop: { handle }`), delivered through the driver's `HookProtocol`.
   - `.run(skillDef, inputMapper?)` — Produces a `BoundAgentSkill` (`Executable<TInput, TOutput>`).
 
 ### 4. Flow Combinators (`H.flow(name)`)
 
 - **`.input(zodSchema)`** — Validates flow input at entry.
+- **`.identify({ ticketId?, touchedPaths? })`** — Names which input values are the run's ticket id and touched paths (for lesson filtering).
 - **`.use(middleware)`** — Wraps the flow lifecycle (e.g., `gitWorktreeIsolation()`).
 - **`.step(name, executable, mapInput?)`** — Runs an executable and merges `{ [name]: TOutput }` into `ctx.steps`.
 - **`.when(predicate, subflowOrExecutable, mapInput?)`** — Conditional execution; subflow step outputs are typed as `Partial<...>`.
 - **`.branch(selector, branchesMap)`** — Keyed routing across executables or subflows; all branch outputs are merged as optional properties on `ctx.steps`.
 - **`.parallel(branchesMap)`** — Concurrent fan-out across executables and `H.when(...)` conditional branches.
 - **`.loop({ maxIterations, body, until })`** — Iterative convergence loop; exposes `ctx.prev` from the prior iteration and resets conditional step keys between iterations so stale values never bleed forward.
-- **`.batch(name, { items, execute, concurrency? })`** — Maps over an array of items via Anthropic Cloud Batch API (50% discount when `items.length > 1` on an Anthropic `ai-sdk` model) or `p-queue`.
+- **`.batch(name, { items, execute, concurrency? })`** — Maps over an array of items via the driver's Cloud Batch adapter (Anthropic, 50% discount, when `items.length > 1`) or `p-queue`.
 - **`.haltIf(predicate, mapBlocker?)`** — Persists flow state to SQLite (`status = 'blocked'`), updates `.harness/BOARD.md`, and suspends until `blocker_resolve` is called via MCP or `store.resolveBlocker()`.
 - **`.onError(handler)` / `.finally(handler)`** — Error recovery and guaranteed cleanup hooks.
 
@@ -197,8 +200,8 @@ const orchestrator = await startOrchestrator({
 | Plugin | Scope | Description |
 | :--- | :--- | :--- |
 | `gitWorktreeIsolation({ baseBranch?, worktreesDir?, cleanupOnSuccess? })` | Flow (`.use()`) | Creates an isolated git worktree (`harness/<runId>`) per flow run and removes it on completion. |
-| `fileLeaseGuard()` | Agent (`.use()`) | Intercepts `Edit`, `Write`, and `MultiEdit` `PreToolUse` hooks and blocks writes to files leased by another active run. |
-| `stopCommandHook(commandDef)` | Agent (`.use()`) | Runs a verification `CommandDef` when an agent attempts to stop and blocks completion with stderr feedback if `passed === false`. |
+| `fileLeaseGuard()` | Agent (`.use()`) | Subscribes to `file-write` tool events (Claude Code: `Edit`, `Write`, `MultiEdit`) and blocks writes to files leased by another active run. |
+| `stopCommandHook(commandDef, { mapInput?, verdict? })` | Agent (`.use()`) | Runs a verification `CommandDef` when an agent attempts to stop and blocks completion with its `summary` if `passed === false`. A command with another output shape passes `verdict(output) => ({ allow, reason })`. |
 
 ---
 
@@ -206,11 +209,11 @@ const orchestrator = await startOrchestrator({
 
 `HarnessStore` manages all state under `<projectDir>/.harness/`:
 
-- **`.harness/state.db`** — SQLite WAL database (`workflow_runs`, `invocations`, `account_quotas`, `file_leases`, `head_sessions`, `state_kv`).
+- **`.harness/runtime.db`** — SQLite WAL database (`workflow_runs`, `invocations`, `account_quotas`, `account_quota_windows`, `file_leases`, `head_sessions`), versioned with `PRAGMA user_version`; a database from another schema version is kept as `runtime.db.v<n>.bak` and a fresh one is created.
 - **`.harness/lessons.jsonl`** — Git-committed scoped lessons (`domain` / `behavioral`), automatically deduplicated by token similarity and injected into matching agents' system prompts.
 - **`.harness/tickets/*.md`** — Markdown tickets with YAML frontmatter parsed via `gray-matter`.
-- **`.harness/BOARD.md`** — Auto-rendered live dashboard with account pool utilization, 5h/7d reset countdowns, active/blocked runs, context token usage, and open blockers.
-- **`.harness/TELEMETRY.md`** — Auto-rendered cost and token ledger with per-run breakdown and per-agent scorecard (first-pass rate, schema retries, actual API USD vs. subscription equivalent USD).
+- **`.harness/BOARD.md`** — Auto-rendered live dashboard with one column per quota window (utilization and reset countdown), active/blocked runs, context token usage, and open blockers.
+- **`.harness/TELEMETRY.md`** — Auto-rendered cost and token ledger with per-run breakdown and per-agent scorecard (first-pass rate, schema retries, actual API USD vs. subscription equivalent USD); unpriced models show `—`.
 
 ---
 
