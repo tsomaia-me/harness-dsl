@@ -31,6 +31,12 @@ export interface SshRunnerOptions extends LocalRunnerOptions {
   readonly healthProbeFn?: (host: string, workDir: string) => Promise<SshHealthSnapshot>;
 }
 
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 export class InactivityTimeoutError extends Error {
   public readonly partialOutput: string;
 
@@ -363,17 +369,17 @@ export class SshRunner extends BaseSlotRunner {
     extraEnv?: Record<string, string>,
   ): string[] {
     const envVars = this.buildSlotEnv(slotIndex, this.portsForSlot(slotIndex), extraEnv);
-    const envPrefix = Object.entries(envVars)
-      .map(([k, v]) => `${k}=${v.replace(/'/g, "'\\''")}`)
-      .join(' ');
-
-    const escapedCmd = command.replace(/'/g, "'\\''");
-    const remoteWrapper = [
-      "setsid bash -c '",
+    const exports = Object.entries(envVars).map(([name, value]) => {
+      if (!ENV_NAME.test(name)) throw new Error(`Invalid environment variable name "${name}"`);
+      return `export ${name}=${shellQuote(value)};`;
+    });
+    const script = [
       'trap "kill -TERM -$$ 2>/dev/null; sleep 0.2; kill -KILL -$$ 2>/dev/null" EXIT INT TERM HUP;',
-      `cd ${this.workDir} && export ${envPrefix} && ${escapedCmd}`,
-      "'",
+      `cd ${shellQuote(this.workDir)} &&`,
+      ...exports,
+      command,
     ].join(' ');
+    const remoteWrapper = `setsid bash -c ${shellQuote(script)}`;
 
     return [...this.getMuxFlags(), this.host, remoteWrapper];
   }

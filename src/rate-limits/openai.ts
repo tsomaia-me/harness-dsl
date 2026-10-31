@@ -10,8 +10,8 @@ export function parseOpenAiDurationMs(duration: string): number | undefined {
 }
 
 export const openaiRateLimits: RateLimitAdapter = {
-  fromHeaders(rawHeaders, nowMs) {
-    const headers = lowercaseHeaders(rawHeaders);
+  fromResponse(response, nowMs) {
+    const headers = lowercaseHeaders(response.headers);
     const windows = (['requests', 'tokens'] as const).map((kind) => {
       const reset = headers[`x-ratelimit-reset-${kind}`];
       const resetMs = reset !== undefined ? parseOpenAiDurationMs(reset) : undefined;

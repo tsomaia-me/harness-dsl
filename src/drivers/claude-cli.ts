@@ -216,6 +216,7 @@ export class ClaudeCliDriver implements Driver {
 
           const totalContext = inTok + cacheCreate + cacheRead + outTok;
           if (
+            event.type === 'assistant' &&
             req.maxContextTokens &&
             totalContext >= req.maxContextTokens - (req.handoffBufferTokens ?? DEFAULT_HANDOFF_BUFFER_TOKENS)
           ) {

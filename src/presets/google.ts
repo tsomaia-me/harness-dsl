@@ -1,7 +1,7 @@
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import type { ProviderPreset } from '../drivers/ai-sdk.js';
 import { googlePricing } from '../pricing/google.js';
-import { ietfRateLimits } from '../rate-limits/ietf.js';
+import { googleRateLimits } from '../rate-limits/google.js';
 
 export const googlePreset: ProviderPreset = {
   name: 'google',
@@ -16,6 +16,6 @@ export const googlePreset: ProviderPreset = {
     };
     return Object.keys(google).length > 0 ? { google } : undefined;
   },
-  rateLimits: ietfRateLimits,
+  rateLimits: googleRateLimits,
   pricing: googlePricing,
 };

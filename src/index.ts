@@ -64,6 +64,7 @@ export {
 export {
   anthropicRateLimits,
   composeRateLimits,
+  googleRateLimits,
   ietfRateLimits,
   openaiRateLimits,
 } from './rate-limits/index.js';
@@ -113,6 +114,7 @@ export type {
   QuotaWindow,
   QuotaWindowPatch,
   RateLimitAdapter,
+  RateLimitResponse,
   ResolvedAccount,
   Runner,
   TokenCounts,

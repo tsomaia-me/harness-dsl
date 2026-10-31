@@ -8,11 +8,12 @@ import { RateLimitedError } from '../../src/quota.js';
 import {
   anthropicRateLimits,
   composeRateLimits,
+  googleRateLimits,
   ietfRateLimits,
   openaiRateLimits,
 } from '../../src/rate-limits/index.js';
 import { HarnessStore } from '../../src/store.js';
-import type { DriverInvokeRequest, ExecutionContext } from '../../src/types.js';
+import type { DriverInvokeRequest, ExecutionContext, RateLimitAdapter } from '../../src/types.js';
 
 const NOW = Date.UTC(2026, 9, 31, 12, 0, 0);
 
@@ -49,7 +50,7 @@ describe('Rate-limit adapters', () => {
   it.each([
     {
       adapter: 'anthropic',
-      parse: anthropicRateLimits.fromHeaders,
+      parse: anthropicRateLimits,
       headers: {
         'anthropic-ratelimit-unified-5h-utilization': '0.42',
         'anthropic-ratelimit-unified-5h-reset': '1793455200',
@@ -71,7 +72,7 @@ describe('Rate-limit adapters', () => {
     },
     {
       adapter: 'openai',
-      parse: openaiRateLimits.fromHeaders,
+      parse: openaiRateLimits,
       headers: {
         'x-ratelimit-limit-requests': '60',
         'x-ratelimit-remaining-requests': '0',
@@ -91,7 +92,7 @@ describe('Rate-limit adapters', () => {
     },
     {
       adapter: 'openai, sub-second reset',
-      parse: openaiRateLimits.fromHeaders,
+      parse: openaiRateLimits,
       headers: {
         'x-ratelimit-limit-tokens': '1000',
         'x-ratelimit-remaining-tokens': '750',
@@ -103,7 +104,7 @@ describe('Rate-limit adapters', () => {
     },
     {
       adapter: 'ietf, mixed-case names and HTTP-date Retry-After',
-      parse: ietfRateLimits.fromHeaders,
+      parse: ietfRateLimits,
       headers: {
         'RateLimit-Limit': '100',
         'RateLimit-Remaining': '25',
@@ -117,34 +118,42 @@ describe('Rate-limit adapters', () => {
     },
     {
       adapter: 'ietf, no rate-limit headers',
-      parse: ietfRateLimits.fromHeaders,
+      parse: ietfRateLimits,
       headers: { 'content-type': 'application/json' },
       expected: {},
     },
   ])('$adapter headers parse into quota windows', ({ parse, headers, expected }) => {
-    expect(parse(headers, NOW)).toStrictEqual(expected);
+    expect(parse.fromResponse({ status: 200, headers }, NOW)).toStrictEqual(expected);
   });
 
-  it('composes adapters, keeping the latest window per id and the latest cooldown', () => {
-    const composed = composeRateLimits(ietfRateLimits, openaiRateLimits);
-    expect(
-      composed.fromHeaders(
-        {
-          'retry-after': '10',
-          'retry-after-ms': '20000',
-          'ratelimit-limit': '10',
-          'ratelimit-remaining': '5',
-          'ratelimit-reset': '1',
-          'x-ratelimit-limit-requests': '4',
-          'x-ratelimit-remaining-requests': '1',
-          'x-ratelimit-reset-requests': '2s',
-        },
-        NOW,
-      ),
-    ).toStrictEqual({
+  it.each([
+    { label: 'RetryInfo seconds', retryDelay: '37s', expected: NOW + 37_000 },
+    { label: 'RetryInfo fractional seconds', retryDelay: '1.5s', expected: NOW + 1_500 },
+  ])('reads the Gemini 429 body ($label)', ({ retryDelay, expected }) => {
+    const body = {
+      error: {
+        code: 429,
+        status: 'RESOURCE_EXHAUSTED',
+        details: [
+          { '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaId: 'GenerateRequestsPerMinutePerProjectPerModel' }] },
+          { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay },
+        ],
+      },
+    };
+    expect(googleRateLimits.fromResponse({ status: 429, headers: {}, body }, NOW)).toStrictEqual({ cooldownUntilMs: expected });
+  });
+
+  it('composes adapters, keeping the last adapter\'s window per id and the latest cooldown', () => {
+    const first: RateLimitAdapter = {
+      fromResponse: () => ({ windows: [{ id: 'shared', utilization: 0.1 }, { id: 'first-only', utilization: 0.2 }], cooldownUntilMs: NOW + 20_000 }),
+    };
+    const second: RateLimitAdapter = {
+      fromResponse: () => ({ windows: [{ id: 'shared', utilization: 0.5 }], cooldownUntilMs: NOW + 10_000 }),
+    };
+    expect(composeRateLimits(first, second).fromResponse({ status: 429, headers: {} }, NOW)).toStrictEqual({
       windows: [
-        { id: 'http:ratelimit', utilization: 0.5, resetsAtMs: NOW + 1_000 },
-        { id: 'openai:requests', utilization: 0.75, resetsAtMs: NOW + 2_000 },
+        { id: 'shared', utilization: 0.5 },
+        { id: 'first-only', utilization: 0.2 },
       ],
       cooldownUntilMs: NOW + 20_000,
     });
@@ -185,6 +194,16 @@ describe('Rate-limit detection in drivers', () => {
     });
   });
 
+  it('does not treat a failed turn whose error names a rate_limiter module as rate limited', async () => {
+    const driver = cliEmitting(
+      [{ type: 'result', is_error: true, result: "Error: Cannot find module './rate_limiter' imported from src/server.ts" }],
+      1,
+    );
+    const error = await driver.invoke(invokeRequest()).catch((err: unknown) => err);
+    expect.soft(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(RateLimitedError);
+  });
+
   it('raises RateLimitedError with the rejected window reset when the claude CLI turn ends in a 429', async () => {
     const rejected = {
       ...capturedRateLimitEvent,
@@ -202,6 +221,26 @@ describe('Rate-limit detection in drivers', () => {
     const error = await driver.invoke(invokeRequest()).catch((err: unknown) => err);
     expect.soft(error).toBeInstanceOf(RateLimitedError);
     expect.soft((error as RateLimitedError).quota.cooldownUntilMs).toBe(1_793_980_800_000);
+  });
+
+  it('reads the Gemini retry delay from the 429 body through the AI SDK driver', async () => {
+    const customFetch = (async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: 429,
+            message: 'Resource exhausted',
+            status: 'RESOURCE_EXHAUSTED',
+            details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '42s' }],
+          },
+        }),
+        { status: 429, headers: { 'content-type': 'application/json', 'retry-after-ms': '0' } },
+      )) as typeof fetch;
+    const driver = H.drivers.aiSdk({ provider: 'google', apiKey: 'test-key', customFetch });
+    const before = Date.now();
+    const error = await driver.invoke(invokeRequest()).catch((err: unknown) => err);
+    expect.soft(error).toBeInstanceOf(RateLimitedError);
+    expect((error as RateLimitedError).quota.cooldownUntilMs ?? 0).toBeGreaterThanOrEqual(before + 42_000);
   });
 
   it('unwraps the AI SDK retry error so the 429 response headers reach the quota', async () => {

@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -58,6 +59,25 @@ describe('LocalRunner & SshRunner Process Containment', () => {
     }
   });
 
+  it('passes env values with spaces, quotes and shell metacharacters through to the remote command', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'harness-ssh-env-'));
+    tempDirs.push(dir);
+    const shimDir = path.join(dir, 'bin');
+    mkdirSync(shimDir);
+    writeFileSync(path.join(shimDir, 'setsid'), '#!/bin/sh\nexec "$@"\n');
+    chmodSync(path.join(shimDir, 'setsid'), 0o755);
+    const runner = new SshRunner('box', { host: 'box.lan', workDir: path.join(dir, 'work dir'), skipPreFlightCheck: true });
+    mkdirSync(path.join(dir, 'work dir'));
+    const value = `--max-old-space-size=4096 --title='it''s' ; echo pwned $HOME`;
+    const remoteLine = runner.buildSshCommandArgs('printf %s "$PORT|$NODE_OPTIONS"', 1, { NODE_OPTIONS: value }).at(-1)!;
+
+    const stdout = execFileSync('/bin/sh', ['-c', remoteLine], {
+      env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}` },
+      encoding: 'utf8',
+    });
+    expect(stdout).toBe(`18010|${value}`);
+  });
+
   it('kills the entire child process tree when inactivityTimeoutMs fires', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'harness-runner-kill-'));
     tempDirs.push(dir);
@@ -113,8 +133,6 @@ describe('LocalRunner & SshRunner Process Containment', () => {
     const remoteScript = args[args.length - 1]!;
     expect.soft(remoteScript).toContain('setsid');
     expect.soft(remoteScript).toContain('kill -TERM -$$');
-    expect.soft(remoteScript).toContain('PORT=18110');
-    expect.soft(remoteScript).toContain('CUSTOM_VAR=yes');
     expect.soft(remoteScript).toContain('/srv/harness/CrookedDuke');
 
     const lowDiskRunner = new SshRunner('wb2-disk', {

@@ -48,6 +48,15 @@ const FIRST_PARTY_PRESETS: Readonly<Record<SdkProviderName, ProviderPreset>> = {
 
 const UNPRICED: PricingAdapter = { estimate: () => null };
 
+function parseJson(text: string | undefined): unknown {
+  if (text === undefined) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 export interface AiSdkDriverOptions {
   readonly provider: SdkProviderName | ProviderPreset;
   readonly apiKeyEnv?: string;
@@ -135,7 +144,7 @@ export class AiSdkDriver implements Driver {
       );
 
       const rawHeaders = (response.response?.headers ?? {}) as Record<string, string | undefined>;
-      const quotaHint = this.rateLimits.fromHeaders(rawHeaders, Date.now());
+      const quotaHint = this.rateLimits.fromResponse({ status: 200, headers: rawHeaders }, Date.now());
 
       const usage: TokenUsage = {
         inputTokens,
@@ -159,7 +168,14 @@ export class AiSdkDriver implements Driver {
         throw new RateLimitedError(
           req.accountId,
           `AI SDK rate limit on account ${req.accountId}: ${apiError.message}`,
-          this.rateLimits.fromHeaders(apiError.responseHeaders ?? {}, Date.now()),
+          this.rateLimits.fromResponse(
+            {
+              status: 429,
+              headers: apiError.responseHeaders ?? {},
+              body: apiError.data ?? parseJson(apiError.responseBody),
+            },
+            Date.now(),
+          ),
         );
       }
       throw err;

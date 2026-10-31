@@ -68,7 +68,7 @@ describe('Skill loop termination', () => {
       invoke: async (req) => {
         calls += 1;
         if (calls >= RUNAWAY) throw new Error('runaway retry loop');
-        throw new RateLimitedError(req.accountId, '429', openaiRateLimits.fromHeaders({ 'retry-after': '0' }, Date.now()));
+        throw new RateLimitedError(req.accountId, '429', openaiRateLimits.fromResponse({ status: 429, headers: { 'retry-after': '0' } }, Date.now()));
       },
     });
     const agent = H.agent('worker').model(H.model(H.account('only', driver), 'model-x'));
@@ -219,6 +219,41 @@ describe('Hook receiver safety', () => {
     const bigToolResult = { type: 'user', message: { content: [{ type: 'tool_result', content: 'x'.repeat(200_000) }] } };
     writeFileSync(transcript, `${JSON.stringify(assistant)}\n${JSON.stringify(bigToolResult)}\n`);
     expect(readClaudeCodeTranscriptTokens(transcript)).toBe(190_000);
+  });
+
+  it('checks the context ceiling on assistant turns, not on the cumulative result usage', async () => {
+    let spawns = 0;
+    const cli = H.drivers.claudeCli({
+      spawnBridge: async (_args, _env, _cwd, onLine) => {
+        spawns += 1;
+        onLine(JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 5, cache_read_input_tokens: 40_000, output_tokens: 500 } } }));
+        onLine(
+          JSON.stringify({
+            type: 'result',
+            structured_output: { done: false },
+            usage: { input_tokens: 50, cache_read_input_tokens: 400_000, output_tokens: 5_000 },
+          }),
+        );
+        return { exitCode: 0, stderr: '' };
+      },
+    });
+    const result = await cli.invoke({
+      accountId: 'a',
+      modelId: 'm',
+      modelOptions: {},
+      systemPrompt: '',
+      userPrompt: 'go',
+      outputJsonSchema: { type: 'object' },
+      workDir: tmpdir(),
+      maxContextTokens: 200_000,
+      handoffBufferTokens: 30_000,
+      runId: 'r',
+      stepName: 's',
+      inactivityTimeoutMs: 5_000,
+      signal: new AbortController().signal,
+    });
+    expect.soft(result.handoffRequested).toBeUndefined();
+    expect(spawns).toBe(1);
   });
 
   it('hands off at the default buffer when a driver is invoked without one', async () => {

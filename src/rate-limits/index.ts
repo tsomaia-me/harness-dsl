@@ -6,5 +6,6 @@ export {
   readClaudeCliRateLimitEvent,
 } from './claude-cli.js';
 export { composeRateLimits } from './compose.js';
+export { googleRateLimits } from './google.js';
 export { ietfRateLimits } from './ietf.js';
 export { openaiRateLimits, parseOpenAiDurationMs } from './openai.js';

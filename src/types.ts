@@ -29,8 +29,14 @@ export interface QuotaPatch {
   readonly cooldownUntilMs?: number | null;
 }
 
+export interface RateLimitResponse {
+  readonly status: number;
+  readonly headers: Readonly<Record<string, string | undefined>>;
+  readonly body?: unknown;
+}
+
 export interface RateLimitAdapter {
-  fromHeaders(headers: Readonly<Record<string, string | undefined>>, nowMs: number): QuotaPatch;
+  fromResponse(response: RateLimitResponse, nowMs: number): QuotaPatch;
 }
 
 export interface QuotaPolicy {

@@ -5,8 +5,8 @@ const UNIFIED_SPANS = ['5h', '7d'] as const;
 const LIMIT_KINDS = ['requests', 'tokens', 'input-tokens', 'output-tokens'] as const;
 
 export const anthropicRateLimits: RateLimitAdapter = {
-  fromHeaders(rawHeaders, nowMs) {
-    const headers = lowercaseHeaders(rawHeaders);
+  fromResponse(response, nowMs) {
+    const headers = lowercaseHeaders(response.headers);
     const unified = UNIFIED_SPANS.map((span): QuotaWindowPatch | null => {
       const utilization = numericHeader(headers, `anthropic-ratelimit-unified-${span}-utilization`);
       const resetSeconds = numericHeader(headers, `anthropic-ratelimit-unified-${span}-reset`);

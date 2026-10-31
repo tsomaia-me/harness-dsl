@@ -31,7 +31,7 @@ export function readClaudeCliRateLimitEvent(event: Record<string, any>): ClaudeC
   };
 }
 
-export const CLAUDE_CLI_RATE_LIMIT_TEXT = /rate.?limit|usage limit|\b429\b/i;
+export const CLAUDE_CLI_RATE_LIMIT_TEXT = /\brate[ -]?limit(?:ed|s)?\b|\busage limit\b|\b429\b/i;
 
 export function parseRateLimitResetFromMessage(msg: string, nowMs = Date.now()): number | null {
   const isoMatch = msg.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/);
