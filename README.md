@@ -209,7 +209,7 @@ const orchestrator = await startOrchestrator({
 
 `HarnessStore` manages all state under `<projectDir>/.harness/`:
 
-- **`.harness/runtime.db`** — SQLite WAL database (`workflow_runs`, `invocations`, `account_quotas`, `account_quota_windows`, `file_leases`, `head_sessions`), versioned with `PRAGMA user_version`; a database from another schema version is kept as `runtime.db.v<n>.bak` and a fresh one is created.
+- **`.harness/runtime.db`** — SQLite WAL database (`workflow_runs`, `invocations`, `account_quotas`, `account_quota_windows`, `file_leases`, `head_sessions`), migrated forward with drizzle-kit migrations on open; a database from 0.2.0 is kept as `runtime.db.v0.bak` and a fresh one is created, and a database written by a newer harness-dsl is refused.
 - **`.harness/lessons.jsonl`** — Git-committed scoped lessons (`domain` / `behavioral`), automatically deduplicated by token similarity and injected into matching agents' system prompts.
 - **`.harness/tickets/*.md`** — Markdown tickets with YAML frontmatter parsed via `gray-matter`.
 - **`.harness/BOARD.md`** — Auto-rendered live dashboard with one column per quota window (utilization and reset countdown), active/blocked runs, context token usage, and open blockers.

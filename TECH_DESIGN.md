@@ -335,7 +335,7 @@ The driver that spawns an agent owns its `HookProtocol`. Before each invocation,
 
 ## §3. SQLite Schema (`src/schema.ts`)
 
-State is persisted in `<projectDir>/.harness/runtime.db` using `better-sqlite3` in `WAL` mode (`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;`) and `drizzle-orm/better-sqlite3`. The schema version is kept in `PRAGMA user_version` (`SCHEMA_VERSION = 1`). A 0.2.0 database is renamed to `runtime.db.v<old>.bak` (with a timestamp suffix if that name is taken) and a fresh one is created.
+State is persisted in `<projectDir>/.harness/runtime.db` using `better-sqlite3` in `WAL` mode (`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;`) and `drizzle-orm/better-sqlite3`. Schema changes ship as drizzle-kit migrations in `drizzle/` (generated from `src/schema.ts` with `pnpm db:generate`, published with the package), applied by drizzle's migrator every time the store opens; `0000_baseline` is the 0.3.0 schema. A database without drizzle's `__drizzle_migrations` table (0.2.0 and earlier) is renamed to `runtime.db.v<user_version>.bak` (with a timestamp suffix if that name is taken) and a fresh one is created. A database carrying a migration newer than the package's latest is refused with an error and left untouched.
 
 ```typescript
 import { integer, primaryKey, real, sqliteTable, text } from 'drizzle-orm/sqlite-core';

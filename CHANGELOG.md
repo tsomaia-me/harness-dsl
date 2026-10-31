@@ -19,6 +19,7 @@ The core no longer names a provider, CLI, model, header, price, hook format, tra
 - **Agents and flows:** `agent.handoffBuffer(tokens)`, `agent.maxHandoffs(n)` with `HandoffLimitError`, and `H.flow(...).identify({ ticketId, touchedPaths })`.
 - **Runner:** `LocalRunnerOptions.portsPerSlot` / `slotEnv`.
 - **Stop hook:** `stopCommandHook(command, { mapInput, verdict })`, with options typed from the command.
+- **Schema migrations:** drizzle-kit migrations in `drizzle/` (baseline `0000_baseline`), applied when the store opens; `pnpm db:generate` creates the next one from `src/schema.ts`.
 - **Custom drivers:** they take `quotaPolicy` and `hookProtocol`, and should honour `DriverInvokeRequest.pricing`, `handoffBufferTokens` and `invocationId`.
 
 ### Fixed
@@ -110,6 +111,6 @@ The core no longer names a provider, CLI, model, header, price, hook format, tra
 
 **Files**
 - The `BOARD.md` account table has one column per quota window. `TELEMETRY.md` cost cells show `—` or `+ unpriced` for unpriced models.
-- `runtime.db`: databases from 0.2.0 are backed up to `runtime.db.v0.bak` and recreated, not migrated.
+- `runtime.db`: databases from 0.2.0 are backed up to `runtime.db.v0.bak` and recreated, not migrated. From 0.3.0 on, the schema changes through drizzle-kit migrations shipped in `drizzle/` and applied on open, and a database written by a newer harness-dsl is refused.
 
 OpenAI and Google batch adapters are not included; they are planned for 0.4.0.

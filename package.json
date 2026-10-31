@@ -4,7 +4,8 @@
   "private": false,
   "type": "module",
   "files": [
-    "dist"
+    "dist",
+    "drizzle"
   ],
   "publishConfig": {
     "access": "public"
@@ -24,6 +25,7 @@
     "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
     "test": "vitest run test/unit",
     "test:e2e": "vitest run test/e2e",
+    "db:generate": "drizzle-kit generate",
     "prepublishOnly": "tsc -p tsconfig.typecheck.json --noEmit && tsc -p tsconfig.json"
   },
   "dependencies": {
@@ -45,6 +47,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.19.0",
     "@types/picomatch": "^4.0.0",
+    "drizzle-kit": "0.31.11",
     "typescript": "^5.9.0",
     "vitest": "^4.0.0"
   }

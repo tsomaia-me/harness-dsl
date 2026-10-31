@@ -8,20 +8,20 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { eq } from 'drizzle-orm';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import matter from 'gray-matter';
 import picomatch from 'picomatch';
 import { z } from 'zod';
 import {
   accountQuotas,
   accountQuotaWindows,
-  BOOTSTRAP_SQL,
   fileLeases,
   headSessions,
   invocations,
-  SCHEMA_VERSION,
   workflowRuns,
 } from './schema.js';
 import type { LessonEntry, QuotaPatch, QuotaWindow } from './types.js';
@@ -72,6 +72,16 @@ export interface FinishInvocationInput {
 export interface StoredQuotaWindow extends QuotaWindow {
   readonly updatedAtMs: number;
 }
+
+const MIGRATIONS_FOLDER = fileURLToPath(new URL('../drizzle', import.meta.url));
+
+const LATEST_MIGRATION_AT = Math.max(
+  ...(
+    JSON.parse(readFileSync(path.join(MIGRATIONS_FOLDER, 'meta', '_journal.json'), 'utf8')) as {
+      entries: { when: number }[];
+    }
+  ).entries.map((entry) => entry.when),
+);
 
 export interface AccountQuotaState {
   readonly accountId: string;
@@ -178,23 +188,39 @@ export class HarnessStore {
     this.boardPath = path.join(this.harnessDir, 'BOARD.md');
     this.telemetryPath = path.join(this.harnessDir, 'TELEMETRY.md');
 
-    this.sqlite = this.openCurrentSchemaDatabase();
+    this.sqlite = this.openMigratableDatabase();
     this.sqlite.pragma('journal_mode = WAL');
     this.sqlite.pragma('busy_timeout = 5000');
-    this.sqlite.exec(BOOTSTRAP_SQL);
-    this.sqlite.pragma(`user_version = ${SCHEMA_VERSION}`);
+    this.refuseNewerSchema();
     this.db = drizzle(this.sqlite);
+    migrate(this.db, { migrationsFolder: MIGRATIONS_FOLDER });
   }
 
-  private openCurrentSchemaDatabase(): Database.Database {
+  private refuseNewerSchema(): void {
+    const tracked = this.sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__drizzle_migrations'")
+      .get();
+    if (!tracked) return;
+    const { appliedAt } = this.sqlite
+      .prepare('SELECT max(created_at) AS appliedAt FROM __drizzle_migrations')
+      .get() as { appliedAt: number | null };
+    if (appliedAt !== null && appliedAt > LATEST_MIGRATION_AT) {
+      this.sqlite.close();
+      throw new Error(
+        `${this.dbPath} was written by a newer harness-dsl (schema migration from ${new Date(appliedAt).toISOString()}); upgrade harness-dsl to open it`,
+      );
+    }
+  }
+
+  private openMigratableDatabase(): Database.Database {
     const existing = new Database(this.dbPath);
-    const version = Number(existing.pragma('user_version', { simple: true }));
-    const { tableCount } = existing
-      .prepare("SELECT count(*) AS tableCount FROM sqlite_master WHERE type = 'table'")
-      .get() as { tableCount: number };
-    if (version === SCHEMA_VERSION || tableCount === 0) {
+    const tables = (
+      existing.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]
+    ).map((table) => table.name);
+    if (tables.length === 0 || tables.includes('__drizzle_migrations')) {
       return existing;
     }
+    const version = Number(existing.pragma('user_version', { simple: true }));
     existing.pragma('wal_checkpoint(TRUNCATE)');
     existing.close();
     const backupPath = `${this.dbPath}.v${version}.bak`;

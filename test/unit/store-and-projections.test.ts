@@ -118,6 +118,28 @@ describe('HarnessStore & Projections', () => {
     store.close();
   });
 
+  it('keeps its data across reopening and refuses a database written by a newer harness-dsl', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'harness-store-test-'));
+    tempDirs.push(dir);
+    const first = new HarnessStore(dir);
+    first.upsertAccountQuota('acct-kept', { projectShareUsed: 0.25 });
+    first.close();
+
+    const reopened = new HarnessStore(dir);
+    expect.soft(reopened.getAccountQuota('acct-kept')?.projectShareUsed).toBe(0.25);
+    reopened.close();
+
+    const dbPath = path.join(dir, '.harness', 'runtime.db');
+    const raw = new Database(dbPath);
+    raw.prepare('INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)').run('from-the-future', Date.now() + 1e12);
+    raw.close();
+
+    expect(() => new HarnessStore(dir)).toThrow(/newer harness-dsl/);
+    const untouched = new Database(dbPath, { readonly: true });
+    expect.soft(untouched.prepare('SELECT project_share_used FROM account_quotas').get()).toEqual({ project_share_used: 0.25 });
+    untouched.close();
+  });
+
   it('enforces exclusive file leases across concurrent runs and releases them cleanly', () => {
     const store = makeStore();
     const first = store.acquireFileLease('run-a', 'apps/admin/src/modules/items/**');
