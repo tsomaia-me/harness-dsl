@@ -29,6 +29,10 @@ export interface QuotaPatch {
   readonly cooldownUntilMs?: number | null;
 }
 
+export interface RateLimitAdapter {
+  fromHeaders(headers: Readonly<Record<string, string | undefined>>, nowMs: number): QuotaPatch;
+}
+
 export interface QuotaPolicy {
   readonly thresholds: Readonly<Record<string, number>>;
   readonly defaultThreshold: number;

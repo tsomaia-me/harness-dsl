@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AccountDef, parseRateLimitHeaders, PoolDef, QuotaExhaustedError } from '../../src/quota.js';
+import { AccountDef, PoolDef, QuotaExhaustedError } from '../../src/quota.js';
 import { HarnessStore } from '../../src/store.js';
 import type {
   Driver,
@@ -240,26 +240,5 @@ describe('Reactive Account Pool & Quota Engine', () => {
     const resolved = await pool.acquireAccount(store);
     expect.soft(resolved.accountId).toBe('api-fallback');
     store.close();
-  });
-
-  it('parses Anthropic unified rate-limit and retry-after headers', () => {
-    const now = 1_700_000_000_000;
-    const parsed = parseRateLimitHeaders(
-      {
-        'anthropic-ratelimit-unified-5h-utilization': '0.42',
-        'anthropic-ratelimit-unified-7d-utilization': '0.71',
-        'anthropic-ratelimit-unified-5h-reset': '1700003600',
-        'anthropic-ratelimit-unified-7d-reset': '1700086400',
-        'retry-after': '30',
-      },
-      now,
-    );
-    expect(parsed).toEqual({
-      windows: [
-        { id: 'anthropic:5h', utilization: 0.42, resetsAtMs: 1_700_003_600_000 },
-        { id: 'anthropic:7d', utilization: 0.71, resetsAtMs: 1_700_086_400_000 },
-      ],
-      cooldownUntilMs: now + 30_000,
-    });
   });
 });

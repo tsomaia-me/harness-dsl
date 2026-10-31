@@ -36,12 +36,18 @@ export {
 export {
   AccountDef,
   DEFAULT_QUOTA_POLICY,
-  parseRateLimitHeaders,
   PoolDef,
   type PoolReserveConfig,
   type PoolStrategy,
   QuotaExhaustedError,
+  RateLimitedError,
 } from './quota.js';
+export {
+  anthropicRateLimits,
+  composeRateLimits,
+  ietfRateLimits,
+  openaiRateLimits,
+} from './rate-limits/index.js';
 export {
   CommandTimeoutError,
   InactivityTimeoutError,
@@ -81,6 +87,7 @@ export type {
   QuotaPolicy,
   QuotaWindow,
   QuotaWindowPatch,
+  RateLimitAdapter,
   ResolvedAccount,
   Runner,
   TokenUsage,

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { parseEnv } from 'node:util';
 import { z } from 'zod';
 import { drivers } from './drivers/index.js';
-import { AccountDef, PoolDef } from './quota.js';
+import { AccountDef, PoolDef, RateLimitedError } from './quota.js';
 import { LocalRunner, type LocalRunnerOptions, SshRunner, type SshRunnerOptions } from './runner.js';
 import type {
   AccountProvider,
@@ -457,9 +457,11 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
 
         return parsedOut.data;
       } catch (err: any) {
-        if (err && typeof err.cooldownUntilMs === 'number') {
+        if (err instanceof RateLimitedError) {
           ctx.store.upsertAccountQuota(resolvedAccount.accountId, {
-            cooldownUntilMs: err.cooldownUntilMs,
+            ...err.quota,
+            cooldownUntilMs:
+              err.quota.cooldownUntilMs ?? Date.now() + resolvedAccount.quotaPolicy.defaultCooldownMs,
           });
           ctx.store.finishInvocation(invId, {
             status: 'fail',

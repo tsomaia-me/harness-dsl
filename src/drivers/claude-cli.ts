@@ -3,6 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { RateLimitedError } from '../quota.js';
+import {
+  CLAUDE_CLI_RATE_LIMIT_TEXT,
+  parseRateLimitResetFromMessage,
+  readClaudeCliRateLimitEvent,
+} from '../rate-limits/claude-cli.js';
 import { InactivityTimeoutError, killProcessGroupAndTree } from '../runner.js';
 import type {
   Driver,
@@ -59,38 +65,6 @@ export function estimateEquivalentUsd(
   const inputCost = (uncachedIn / 1_000_000) * inRatePerM;
   const outputCost = (outputTokens / 1_000_000) * outRatePerM;
   return Number((inputCost + cachedCost + outputCost).toFixed(6));
-}
-
-export function parseRateLimitResetFromMessage(msg: string, nowMs = Date.now()): number {
-  const isoMatch = msg.match(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/);
-  if (isoMatch) {
-    const parsed = Date.parse(isoMatch[0]);
-    if (!Number.isNaN(parsed) && parsed > nowMs) {
-      return parsed;
-    }
-  }
-
-  const relMatch = msg.match(
-    /(?:reset(?:s| at| in)?|retry(?: after| in)?|in)\s+(\d+)\s*(s|sec|seconds|m|min|minutes|h|hr|hours)\b/i,
-  );
-  if (relMatch) {
-    const amount = Number(relMatch[1]);
-    const unit = relMatch[2]!.toLowerCase();
-    const mult = unit.startsWith('h') ? 3_600_000 : unit.startsWith('m') ? 60_000 : 1_000;
-    if (amount > 0) {
-      return nowMs + amount * mult;
-    }
-  }
-
-  const epochMatch = msg.match(/\b(1[789]\d{8})\b/);
-  if (epochMatch) {
-    const epochMs = Number(epochMatch[1]) * 1000;
-    if (epochMs > nowMs) {
-      return epochMs;
-    }
-  }
-
-  return nowMs + 60_000;
 }
 
 function expandHome(filepath: string): string {
@@ -257,7 +231,10 @@ export class ClaudeCliDriver implements Driver {
     let structuredOutput: unknown = undefined;
     let rawText = '';
     let handoffTriggered = false;
-    let rateLimitResetMs: number | null = null;
+    let latestQuota: QuotaPatch = {};
+    let rejectedUntilMs: number | null = null;
+    let turnRateLimited = false;
+    let errorText = '';
 
     const onLine = (line: string) => {
       const trimmed = line.trim();
@@ -301,10 +278,16 @@ export class ClaudeCliDriver implements Driver {
           }
         }
 
+        const rateLimitEvent = readClaudeCliRateLimitEvent(event);
+        if (rateLimitEvent) {
+          latestQuota = rateLimitEvent.quota;
+          rejectedUntilMs = rateLimitEvent.rejectedUntilMs;
+        }
+
         if (event.type === 'error' || event.is_error === true) {
-          const msg = String(event.error?.message ?? event.result ?? '');
-          if (/rate.?limit|429|quota|not logged in/i.test(msg)) {
-            rateLimitResetMs = parseRateLimitResetFromMessage(msg);
+          errorText = String(event.error?.message ?? event.result ?? '');
+          if (event.api_error_status === 429 || CLAUDE_CLI_RATE_LIMIT_TEXT.test(errorText)) {
+            turnRateLimited = true;
           }
         }
       } catch (err) {
@@ -323,12 +306,16 @@ export class ClaudeCliDriver implements Driver {
         req.signal,
       );
 
-      const combinedErrText = `${stderr} ${rawText}`;
-      if (rateLimitResetMs !== null || /rate.?limit|429|not logged in/i.test(combinedErrText)) {
-        const err = new Error(`Rate limit reached on account ${req.accountId}: ${stderr || rawText}`);
-        (err as any).cooldownUntilMs =
-          rateLimitResetMs ?? parseRateLimitResetFromMessage(combinedErrText);
-        throw err;
+      const failedWithRateLimitText =
+        exitCode !== 0 && structuredOutput === undefined && CLAUDE_CLI_RATE_LIMIT_TEXT.test(stderr);
+      if (turnRateLimited || failedWithRateLimitText) {
+        const detail = errorText || stderr;
+        const cooldownUntilMs = rejectedUntilMs ?? parseRateLimitResetFromMessage(detail);
+        throw new RateLimitedError(
+          req.accountId,
+          `Rate limit reached on account ${req.accountId}: ${detail}`,
+          { ...latestQuota, ...(cooldownUntilMs !== null ? { cooldownUntilMs } : {}) },
+        );
       }
 
       if (exitCode !== 0 && structuredOutput === undefined) {
@@ -419,6 +406,7 @@ export class ClaudeCliDriver implements Driver {
         sessionId,
         usage,
         handoffRequested,
+        quotaHint: latestQuota.windows ? latestQuota : undefined,
       };
     } finally {
       if (settingsFilePath) {

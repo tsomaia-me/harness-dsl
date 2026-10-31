@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
-import { generateText, jsonSchema, Output } from 'ai';
-import { parseRateLimitHeaders } from '../quota.js';
+import { APICallError, generateText, jsonSchema, Output, RetryError } from 'ai';
+import { RateLimitedError } from '../quota.js';
+import { anthropicRateLimits, ietfRateLimits, openaiRateLimits } from '../rate-limits/index.js';
 import type {
   BatchAdapter,
   BatchItemRequest,
@@ -11,11 +12,18 @@ import type {
   Driver,
   DriverInvokeRequest,
   DriverInvokeResult,
+  RateLimitAdapter,
   TokenUsage,
 } from '../types.js';
-import { estimateEquivalentUsd, parseRateLimitResetFromMessage } from './claude-cli.js';
+import { estimateEquivalentUsd } from './claude-cli.js';
 
 export type SdkProviderName = 'anthropic' | 'google' | 'openai';
+
+const DEFAULT_RATE_LIMITS: Readonly<Record<SdkProviderName, RateLimitAdapter>> = {
+  anthropic: anthropicRateLimits,
+  google: ietfRateLimits,
+  openai: openaiRateLimits,
+};
 
 export interface AiSdkDriverOptions {
   readonly provider: SdkProviderName;
@@ -24,6 +32,7 @@ export interface AiSdkDriverOptions {
   readonly baseURL?: string;
   readonly useCloudBatch?: boolean;
   readonly customFetch?: typeof fetch;
+  readonly rateLimits?: RateLimitAdapter;
 }
 
 export class AiSdkDriver implements Driver {
@@ -33,6 +42,7 @@ export class AiSdkDriver implements Driver {
   private readonly explicitApiKey?: string;
   private readonly baseURL?: string;
   private readonly customFetch?: typeof fetch;
+  private readonly rateLimits: RateLimitAdapter;
   public readonly batch?: BatchAdapter;
 
   public constructor(opts: AiSdkDriverOptions) {
@@ -41,6 +51,7 @@ export class AiSdkDriver implements Driver {
     this.explicitApiKey = opts.apiKey;
     this.baseURL = opts.baseURL;
     this.customFetch = opts.customFetch;
+    this.rateLimits = opts.rateLimits ?? DEFAULT_RATE_LIMITS[opts.provider];
 
     const enableBatch = opts.useCloudBatch ?? true;
     if (enableBatch && opts.provider === 'anthropic') {
@@ -150,7 +161,7 @@ export class AiSdkDriver implements Driver {
       const cost = estimateEquivalentUsd(req.modelId, inputTokens, cachedInputTokens, outputTokens);
 
       const rawHeaders = (response.response?.headers ?? {}) as Record<string, string | undefined>;
-      const quotaHint = parseRateLimitHeaders(rawHeaders);
+      const quotaHint = this.rateLimits.fromHeaders(rawHeaders, Date.now());
 
       const usage: TokenUsage = {
         inputTokens,
@@ -167,22 +178,14 @@ export class AiSdkDriver implements Driver {
         usage,
         quotaHint: Object.keys(quotaHint).length > 0 ? quotaHint : undefined,
       };
-    } catch (err: any) {
-      const statusCode = Number(err?.statusCode ?? err?.status ?? 0);
-      const errMsg = String(err?.message ?? err);
-      if (statusCode === 429 || /rate.?limit|429|quota/i.test(errMsg)) {
-        const errHeaders = (err?.responseHeaders ?? err?.headers ?? {}) as Record<
-          string,
-          string | undefined
-        >;
-        const hint = parseRateLimitHeaders(errHeaders);
-        const cooldownUntilMs =
-          hint.cooldownUntilMs ??
-          hint.windows?.find((w) => w.id === 'anthropic:5h')?.resetsAtMs ??
-          parseRateLimitResetFromMessage(errMsg);
-        const wrapped = new Error(`AI SDK rate limit on account ${req.accountId}: ${errMsg}`);
-        (wrapped as any).cooldownUntilMs = cooldownUntilMs;
-        throw wrapped;
+    } catch (err) {
+      const apiError = RetryError.isInstance(err) ? err.lastError : err;
+      if (APICallError.isInstance(apiError) && apiError.statusCode === 429) {
+        throw new RateLimitedError(
+          req.accountId,
+          `AI SDK rate limit on account ${req.accountId}: ${apiError.message}`,
+          this.rateLimits.fromHeaders(apiError.responseHeaders ?? {}, Date.now()),
+        );
       }
       throw err;
     }

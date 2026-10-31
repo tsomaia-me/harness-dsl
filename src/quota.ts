@@ -5,7 +5,6 @@ import type {
   QuotaPatch,
   QuotaPolicy,
   QuotaWindow,
-  QuotaWindowPatch,
   ResolvedAccount,
 } from './types.js';
 
@@ -27,6 +26,18 @@ export class QuotaExhaustedError extends Error {
     );
     this.name = 'QuotaExhaustedError';
     this.nextAvailableAtMs = nextAvailableAtMs;
+  }
+}
+
+export class RateLimitedError extends Error {
+  public readonly accountId: string;
+  public readonly quota: QuotaPatch;
+
+  public constructor(accountId: string, message: string, quota: QuotaPatch = {}) {
+    super(message);
+    this.name = 'RateLimitedError';
+    this.accountId = accountId;
+    this.quota = quota;
   }
 }
 
@@ -319,31 +330,4 @@ export class PoolDef implements AccountProvider {
     const winner = sorted[0]!;
     return winner.account.resolve(store, winner.effectiveShareCap);
   }
-}
-
-export function parseRateLimitHeaders(
-  headers: Record<string, string | undefined>,
-  nowMs = Date.now(),
-): QuotaPatch {
-  const numeric = (name: string): number | undefined => {
-    const raw = headers[name];
-    return raw !== undefined && !Number.isNaN(Number(raw)) ? Number(raw) : undefined;
-  };
-  const windows: QuotaWindowPatch[] = [];
-  for (const span of ['5h', '7d']) {
-    const utilization = numeric(`anthropic-ratelimit-unified-${span}-utilization`);
-    const resetSeconds = numeric(`anthropic-ratelimit-unified-${span}-reset`);
-    if (utilization !== undefined || resetSeconds !== undefined) {
-      windows.push({
-        id: `anthropic:${span}`,
-        utilization,
-        resetsAtMs: resetSeconds !== undefined ? resetSeconds * 1000 : undefined,
-      });
-    }
-  }
-  const retryAfterSeconds = numeric('retry-after');
-  return {
-    ...(windows.length > 0 ? { windows } : {}),
-    ...(retryAfterSeconds !== undefined ? { cooldownUntilMs: nowMs + retryAfterSeconds * 1000 } : {}),
-  };
 }
