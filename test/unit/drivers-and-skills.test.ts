@@ -182,7 +182,8 @@ describe('Drivers, Skills, Commands, and Agent Execution', () => {
 
     const WorkSkill = H.skill('work')
       .input(z.object({ task: z.string() }))
-      .output(z.object({ done: z.boolean() }));
+      .output(z.object({ done: z.boolean() }))
+      .handoffWhen((output) => !output.done);
 
     const HelperTool = H.command('helper-tool')
       .input(z.object({ q: z.string() }))
@@ -206,6 +207,35 @@ describe('Drivers, Skills, Commands, and Agent Execution', () => {
     const quota1 = store.getAccountQuota('cli-1');
     expect.soft((quota1?.cooldownUntilMs ?? 0) > Date.now() + 240_000).toBe(true);
     store.close();
+  });
+
+  it.each([
+    { label: 'an OAuth token', opts: { oauthToken: 'oauth-test-value' }, expected: { CLAUDE_CODE_OAUTH_TOKEN: 'oauth-test-value' } },
+    { label: 'a config dir that looks like a token', opts: { configDir: 'sk-ant-workspace' }, expected: { CLAUDE_CONFIG_DIR: 'sk-ant-workspace' } },
+  ])('passes $label to the claude CLI through its own env variable', async ({ opts, expected }) => {
+    let seenEnv: Record<string, string> = {};
+    const driver = H.drivers.claudeCli({
+      ...opts,
+      spawnBridge: async (_args, env, _cwd, onLine) => {
+        seenEnv = env;
+        onLine(JSON.stringify({ type: 'result', structured_output: {} }));
+        return { exitCode: 0, stderr: '' };
+      },
+    });
+    await driver.invoke({
+      accountId: 'a',
+      modelId: 'm',
+      modelOptions: {},
+      systemPrompt: '',
+      userPrompt: 'go',
+      outputJsonSchema: { type: 'object' },
+      workDir: tmpdir(),
+      runId: 'r',
+      stepName: 's',
+      inactivityTimeoutMs: 5_000,
+      signal: new AbortController().signal,
+    });
+    expect(seenEnv).toStrictEqual(expected);
   });
 
   it('executes H.command with .envFrom() and preserves handler across .run().input().output()', async () => {

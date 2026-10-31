@@ -33,7 +33,16 @@ describe('Hook protocols', () => {
       preToolIntents: ['file-write'],
       stop: true,
     }) as Record<string, any>;
-    expect.soft(settings.hooks.PreToolUse[0].matcher).toBe('Edit|Write|MultiEdit');
+    expect.soft(settings.hooks.PreToolUse[0].matcher).toBe('Edit|Write|MultiEdit|NotebookEdit');
+    expect
+      .soft(
+        claudeCodeHookProtocol.parse({
+          hook_event_name: 'PreToolUse',
+          tool_name: 'NotebookEdit',
+          tool_input: { notebook_path: '/repo/analysis.ipynb', new_source: 'x' },
+        }),
+      )
+      .toMatchObject({ intent: 'file-write', filePaths: ['/repo/analysis.ipynb'] });
     expect.soft(settings.hooks.PreToolUse[0].hooks[0].command).toContain('"http://127.0.0.1:4100/internal/hook?runId=r1"');
     expect.soft(settings.hooks.Stop[0].hooks[0].type).toBe('command');
     expect.soft(Object.keys(settings.hooks)).toEqual(['PreToolUse', 'Stop']);
@@ -140,7 +149,8 @@ describe('Hook protocols', () => {
     });
     const base = H.agent('builder').model(H.model(H.account('cli', cli), 'claude-opus-5-5')).maxContextTokens(100_000);
     const agent = buffer === undefined ? base : base.handoffBuffer(buffer);
-    await agent.run(H.skill('s').input(z.object({})).output(z.object({ done: z.boolean() }))).execute({}, ctx);
+    const skill = H.skill('s').input(z.object({})).output(z.object({ done: z.boolean() })).handoffWhen((out) => !out.done);
+    await agent.run(skill).execute({}, ctx);
     expect(spawns).toBe(expectedSpawns);
     store.close();
   });

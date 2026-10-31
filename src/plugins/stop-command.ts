@@ -20,7 +20,10 @@ type VerdictOption<TOutput> = [TOutput] extends [StopCheckOutput]
   ? { readonly verdict?: (output: TOutput) => StopVerdict }
   : { readonly verdict: (output: TOutput) => StopVerdict };
 
-export type StopCommandHookOptions<TInput, TOutput> = MapInputOption<TInput> & VerdictOption<TOutput>;
+export const DEFAULT_MAX_CONSECUTIVE_BLOCKS = 3;
+
+export type StopCommandHookOptions<TInput, TOutput> = MapInputOption<TInput> &
+  VerdictOption<TOutput> & { readonly maxConsecutiveBlocks?: number };
 
 type OptionsArgument<TInput, TOutput> = {} extends StopCommandHookOptions<TInput, TOutput>
   ? [opts?: StopCommandHookOptions<TInput, TOutput>]
@@ -36,8 +39,14 @@ export function stopCommandHook<TInput, TOutput>(
   ...[opts]: OptionsArgument<TInput, TOutput>
 ): AgentPlugin {
   const options = opts as
-    | { readonly mapInput?: (ctx: StopHookContext) => TInput; readonly verdict?: (output: TOutput) => StopVerdict }
+    | {
+        readonly mapInput?: (ctx: StopHookContext) => TInput;
+        readonly verdict?: (output: TOutput) => StopVerdict;
+        readonly maxConsecutiveBlocks?: number;
+      }
     | undefined;
+  const maxConsecutiveBlocks = options?.maxConsecutiveBlocks ?? DEFAULT_MAX_CONSECUTIVE_BLOCKS;
+  const blocksByInvocation = new Map<string, number>();
   const mapInput = options?.mapInput ?? ((ctx: StopHookContext) => ({ workDir: ctx.workDir }) as TInput);
   const verdict = options?.verdict ?? passedVerdict;
   return {
@@ -56,9 +65,13 @@ export function stopCommandHook<TInput, TOutput>(
         });
 
         const decision = verdict(output);
-        return decision.allow
-          ? { allow: true }
-          : { allow: false, reason: decision.reason ?? `Stop check "${command.name}" failed` };
+        const blocks = decision.allow ? 0 : (blocksByInvocation.get(ctx.invocationId) ?? 0) + 1;
+        if (decision.allow || blocks > maxConsecutiveBlocks) {
+          blocksByInvocation.delete(ctx.invocationId);
+          return { allow: true };
+        }
+        blocksByInvocation.set(ctx.invocationId, blocks);
+        return { allow: false, reason: decision.reason ?? `Stop check "${command.name}" failed` };
       },
     },
   };

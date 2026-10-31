@@ -81,7 +81,7 @@ describe('First-Party Plugins & Head MCP Server', () => {
       .output(z.object({ passed: z.boolean(), summary: z.string() }))
       .run(({ input }) => ({ passed: false, summary: JSON.stringify(input) }));
     const event = { phase: 'stop', intent: null, filePaths: [], raw: {} } as const;
-    await expect(stopCommandHook(Echo).stop!.handle(event, { runId: 'run-E', store, workDir: repoDir })).resolves.toEqual({
+    await expect(stopCommandHook(Echo).stop!.handle(event, { runId: 'run-E', invocationId: 'inv-E', store, workDir: repoDir })).resolves.toEqual({
       allow: false,
       reason: JSON.stringify({ workDir: repoDir }),
     });
@@ -100,7 +100,7 @@ describe('First-Party Plugins & Head MCP Server', () => {
       verdict: (out) => ({ allow: out.exitCode === 0, reason: out.log }),
     });
     const event = { phase: 'stop', intent: null, filePaths: [], raw: {} } as const;
-    await expect(hook.stop!.handle(event, { runId: 'run-L', store, workDir: repoDir })).resolves.toEqual({
+    await expect(hook.stop!.handle(event, { runId: 'run-L', invocationId: 'inv-L', store, workDir: repoDir })).resolves.toEqual({
       allow: false,
       reason: `3 errors in ${path.basename(repoDir)}`,
     });

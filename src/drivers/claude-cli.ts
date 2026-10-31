@@ -44,6 +44,7 @@ export interface ClaudeCliSpawnBridge {
 
 export interface ClaudeCliDriverOptions {
   readonly configDir?: string;
+  readonly oauthToken?: string;
   readonly claudeBinary?: string;
   readonly env?: Record<string, string>;
   readonly spawnBridge?: ClaudeCliSpawnBridge;
@@ -70,6 +71,7 @@ const HANDOFF_JSON_SCHEMA = {
 export class ClaudeCliDriver implements Driver {
   public readonly kind = 'claude-cli';
   public readonly configDir?: string;
+  private readonly oauthToken?: string;
   public readonly claudeBinary: string;
   private readonly extraEnv: Record<string, string>;
   private readonly spawnBridge?: ClaudeCliSpawnBridge;
@@ -79,6 +81,7 @@ export class ClaudeCliDriver implements Driver {
 
   public constructor(opts?: ClaudeCliDriverOptions) {
     this.configDir = opts?.configDir ? expandHome(opts.configDir) : undefined;
+    this.oauthToken = opts?.oauthToken;
     this.claudeBinary = opts?.claudeBinary ?? 'claude';
     this.extraEnv = opts?.env ?? {};
     this.spawnBridge = opts?.spawnBridge;
@@ -179,12 +182,11 @@ export class ClaudeCliDriver implements Driver {
     const env: Record<string, string> = {
       ...this.extraEnv,
     };
-    if (this.configDir) {
-      if (this.configDir.startsWith('sk-ant-')) {
-        env.CLAUDE_CODE_OAUTH_TOKEN = this.configDir;
-      } else if (this.configDir !== path.join(homedir(), '.claude')) {
-        env.CLAUDE_CONFIG_DIR = this.configDir;
-      }
+    if (this.configDir && this.configDir !== path.join(homedir(), '.claude')) {
+      env.CLAUDE_CONFIG_DIR = this.configDir;
+    }
+    if (this.oauthToken) {
+      env.CLAUDE_CODE_OAUTH_TOKEN = this.oauthToken;
     }
 
     let inputTokens = 0;
@@ -307,11 +309,9 @@ export class ClaudeCliDriver implements Driver {
         structuredOutput = JSON.parse(rawText.trim());
       }
 
-      const isIncompleteOutput =
-        structuredOutput === undefined ||
-        (typeof structuredOutput === 'object' &&
-          structuredOutput !== null &&
-          (structuredOutput as Record<string, unknown>).done === false);
+      const isIncompleteOutput = req.isIncomplete
+        ? req.isIncomplete(structuredOutput)
+        : structuredOutput === undefined;
 
       let handoffRequested: { summary: string; remainingWork: readonly string[] } | undefined;
 

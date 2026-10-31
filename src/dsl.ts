@@ -206,37 +206,45 @@ export class CommandDef<TInput = unknown, TOutput = unknown>
   }
 }
 
+export interface SkillOptions<TInput, TOutput> {
+  readonly inputSchema?: z.ZodType<TInput>;
+  readonly outputSchema?: z.ZodType<TOutput>;
+  readonly promptBuilder?: (input: TInput) => string;
+  readonly assertFn?: (output: TOutput, input: TInput) => Promise<void> | void;
+  readonly handoffWhenFn?: (output: TOutput) => boolean;
+  readonly maxRetriesCount?: number;
+}
+
 export class SkillDef<TInput = unknown, TOutput = unknown> {
   public readonly name: string;
   public readonly inputSchema: z.ZodType<TInput>;
   public readonly outputSchema: z.ZodType<TOutput>;
   public readonly promptBuilder?: (input: TInput) => string;
   public readonly assertFn?: (output: TOutput, input: TInput) => Promise<void> | void;
+  public readonly handoffWhenFn?: (output: TOutput) => boolean;
   public readonly maxRetriesCount: number;
+  private readonly opts: SkillOptions<TInput, TOutput>;
 
-  public constructor(
-    name: string,
-    opts?: {
-      inputSchema?: z.ZodType<TInput>;
-      outputSchema?: z.ZodType<TOutput>;
-      promptBuilder?: (input: TInput) => string;
-      assertFn?: (output: TOutput, input: TInput) => Promise<void> | void;
-      maxRetriesCount?: number;
-    },
-  ) {
+  public constructor(name: string, opts: SkillOptions<TInput, TOutput> = {}) {
     this.name = name;
-    this.inputSchema = (opts?.inputSchema ?? z.any()) as z.ZodType<TInput>;
-    this.outputSchema = (opts?.outputSchema ?? z.any()) as z.ZodType<TOutput>;
-    this.promptBuilder = opts?.promptBuilder;
-    this.assertFn = opts?.assertFn;
-    this.maxRetriesCount = opts?.maxRetriesCount ?? 2;
+    this.opts = opts;
+    this.inputSchema = (opts.inputSchema ?? z.any()) as z.ZodType<TInput>;
+    this.outputSchema = (opts.outputSchema ?? z.any()) as z.ZodType<TOutput>;
+    this.promptBuilder = opts.promptBuilder;
+    this.assertFn = opts.assertFn;
+    this.handoffWhenFn = opts.handoffWhenFn;
+    this.maxRetriesCount = opts.maxRetriesCount ?? 2;
+  }
+
+  private with(patch: SkillOptions<TInput, TOutput>): SkillDef<TInput, TOutput> {
+    return new SkillDef<TInput, TOutput>(this.name, { ...this.opts, ...patch });
   }
 
   public input<TNewIn>(schema: z.ZodType<TNewIn>): SkillDef<TNewIn, TOutput> {
     return new SkillDef<TNewIn, TOutput>(this.name, {
       inputSchema: schema,
       outputSchema: this.outputSchema,
-      assertFn: undefined,
+      handoffWhenFn: this.handoffWhenFn,
       maxRetriesCount: this.maxRetriesCount,
     });
   }
@@ -246,45 +254,31 @@ export class SkillDef<TInput = unknown, TOutput = unknown> {
       inputSchema: this.inputSchema,
       outputSchema: schema,
       promptBuilder: this.promptBuilder,
-      assertFn: undefined,
       maxRetriesCount: this.maxRetriesCount,
     });
   }
 
   public prompt(templateOrBuilder: string | ((input: TInput) => string)): SkillDef<TInput, TOutput> {
-    const fn =
-      typeof templateOrBuilder === 'string'
-        ? (input: TInput) => `${templateOrBuilder}\n\nInput:\n${JSON.stringify(input, null, 2)}`
-        : templateOrBuilder;
-    return new SkillDef<TInput, TOutput>(this.name, {
-      inputSchema: this.inputSchema,
-      outputSchema: this.outputSchema,
-      promptBuilder: fn,
-      assertFn: this.assertFn,
-      maxRetriesCount: this.maxRetriesCount,
+    return this.with({
+      promptBuilder:
+        typeof templateOrBuilder === 'string'
+          ? (input: TInput) => `${templateOrBuilder}\n\nInput:\n${JSON.stringify(input, null, 2)}`
+          : templateOrBuilder,
     });
   }
 
   public assert(
     assertFn: (output: TOutput, input: TInput) => Promise<void> | void,
   ): SkillDef<TInput, TOutput> {
-    return new SkillDef<TInput, TOutput>(this.name, {
-      inputSchema: this.inputSchema,
-      outputSchema: this.outputSchema,
-      promptBuilder: this.promptBuilder,
-      assertFn,
-      maxRetriesCount: this.maxRetriesCount,
-    });
+    return this.with({ assertFn });
+  }
+
+  public handoffWhen(isUnfinished: (output: TOutput) => boolean): SkillDef<TInput, TOutput> {
+    return this.with({ handoffWhenFn: isUnfinished });
   }
 
   public maxRetries(count: number): SkillDef<TInput, TOutput> {
-    return new SkillDef<TInput, TOutput>(this.name, {
-      inputSchema: this.inputSchema,
-      outputSchema: this.outputSchema,
-      promptBuilder: this.promptBuilder,
-      assertFn: this.assertFn,
-      maxRetriesCount: count,
-    });
+    return this.with({ maxRetriesCount: count });
   }
 }
 
@@ -448,6 +442,10 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
           customTools: this.agent.customTools,
           maxContextTokens: this.agent.maxContextTokensLimit,
           handoffBufferTokens: this.agent.handoffBufferTokensValue,
+          isIncomplete: (output) => {
+            const parsed = this.skill.outputSchema.safeParse(output);
+            return !parsed.success || (this.skill.handoffWhenFn?.(parsed.data) ?? false);
+          },
           hookServerUrl: hookReceiver?.url,
           invocationId: invId,
           hookSubscriptions,

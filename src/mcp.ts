@@ -625,7 +625,12 @@ export class HarnessMcpServer implements HookReceiver {
     }
 
     if (tokens > 0) this.store.setRunContextTokens(registration.runId, tokens);
-    const ctx = { runId: registration.runId, store: this.store, workDir: registration.workDir };
+    const ctx = {
+      runId: registration.runId,
+      invocationId: invocationId!,
+      store: this.store,
+      workDir: registration.workDir,
+    };
     for (const plugin of registration.plugins) {
       const handler =
         event.phase === 'pre-tool'

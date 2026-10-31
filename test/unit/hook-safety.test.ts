@@ -256,6 +256,78 @@ describe('Hook receiver safety', () => {
     expect(spawns).toBe(1);
   });
 
+  it.each([
+    { label: 'returns a valid output reached at the ceiling when the skill names no handoff rule', output: { done: false }, rule: undefined, expectedSpawns: 1 },
+    { label: 'hands off when the output reached at the ceiling is invalid', output: { note: 'half way' }, rule: undefined, expectedSpawns: 3 },
+    { label: "hands off when the skill's handoffWhen says the output is unfinished", output: { done: false }, rule: true, expectedSpawns: 3 },
+  ])('$label', async ({ output, rule, expectedSpawns }) => {
+    const dir = makeDir();
+    const store = new HarnessStore(dir);
+    let spawns = 0;
+    const cli = H.drivers.claudeCli({
+      spawnBridge: async (args, _env, _cwd, onLine) => {
+        spawns += 1;
+        if (args.includes('--resume')) {
+          onLine(JSON.stringify({ type: 'result', structured_output: { summary: 's', remainingWork: ['rest'] } }));
+          return { exitCode: 0, stderr: '' };
+        }
+        const finished = spawns > 1;
+        onLine(JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: finished ? 1_000 : 90_000, output_tokens: 0 } } }));
+        onLine(JSON.stringify({ type: 'result', structured_output: finished ? { done: true } : output }));
+        return { exitCode: 0, stderr: '' };
+      },
+    });
+    const base = H.skill('s').input(z.object({})).output(z.object({ done: z.boolean() }));
+    const skill = rule ? base.handoffWhen((out) => !out.done) : base;
+    await H.agent('b').model(H.model(H.account('cli', cli), 'm')).maxContextTokens(100_000).run(skill).execute({}, execCtx(store, dir));
+    expect(spawns).toBe(expectedSpawns);
+    store.close();
+  });
+
+  it('stops blocking a stop check after maxConsecutiveBlocks so the agent cannot loop forever', async () => {
+    const dir = makeDir();
+    const store = new HarnessStore(dir);
+    const failing = H.command('never-green')
+      .input(z.any())
+      .output(z.object({ passed: z.boolean(), summary: z.string() }))
+      .run(() => ({ passed: false, summary: 'still red' }));
+    const hook = stopCommandHook(failing, { maxConsecutiveBlocks: 2 });
+    const event = { phase: 'stop', intent: null, filePaths: [], raw: {} } as const;
+    const ctx = { runId: 'run-s', invocationId: 'inv-1', store, workDir: dir };
+    const decisions = [];
+    for (let i = 0; i < 3; i += 1) decisions.push((await hook.stop!.handle(event, ctx)).allow);
+    expect(decisions).toEqual([false, false, true]);
+    store.close();
+  });
+
+  it('does not read a done field when the driver is invoked without an incomplete rule', async () => {
+    let spawns = 0;
+    const cli = H.drivers.claudeCli({
+      spawnBridge: async (_args, _env, _cwd, onLine) => {
+        spawns += 1;
+        onLine(JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 90_000, output_tokens: 0 } } }));
+        onLine(JSON.stringify({ type: 'result', structured_output: { done: false } }));
+        return { exitCode: 0, stderr: '' };
+      },
+    });
+    const result = await cli.invoke({
+      accountId: 'a',
+      modelId: 'm',
+      modelOptions: {},
+      systemPrompt: '',
+      userPrompt: 'go',
+      outputJsonSchema: { type: 'object' },
+      workDir: tmpdir(),
+      maxContextTokens: 100_000,
+      runId: 'r',
+      stepName: 's',
+      inactivityTimeoutMs: 5_000,
+      signal: new AbortController().signal,
+    });
+    expect.soft(result.handoffRequested).toBeUndefined();
+    expect(spawns).toBe(1);
+  });
+
   it('hands off at the default buffer when a driver is invoked without one', async () => {
     let spawns = 0;
     const cli = H.drivers.claudeCli({
@@ -266,7 +338,7 @@ describe('Hook receiver safety', () => {
           return { exitCode: 0, stderr: '' };
         }
         onLine(JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 80_000, output_tokens: 0 } } }));
-        onLine(JSON.stringify({ type: 'result', structured_output: { done: false } }));
+        onLine(JSON.stringify({ type: 'result' }));
         return { exitCode: 0, stderr: '' };
       },
     });

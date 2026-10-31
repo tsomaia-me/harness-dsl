@@ -98,6 +98,7 @@ export interface DriverInvokeRequest {
   readonly customTools?: ReadonlyMap<string, Executable<any, any>>;
   readonly maxContextTokens?: number;
   readonly handoffBufferTokens?: number;
+  readonly isIncomplete?: (structuredOutput: unknown) => boolean;
   readonly hookServerUrl?: string;
   readonly invocationId?: string;
   readonly hookSubscriptions?: HookSubscriptions;
@@ -249,6 +250,7 @@ export interface HookReceiver {
 
 export interface PluginContext {
   readonly runId: string;
+  readonly invocationId: string;
   readonly store: HarnessStore;
   readonly workDir: string;
 }

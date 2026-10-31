@@ -2,7 +2,7 @@ import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs';
 import type { HookProtocol, ToolEvent, ToolEventPhase } from '../types.js';
 
 const TRANSCRIPT_TAIL_BYTES = 65_536;
-const FILE_WRITE_TOOLS = ['Edit', 'Write', 'MultiEdit'];
+const FILE_WRITE_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'];
 
 const PHASE_BY_EVENT: Readonly<Record<string, ToolEventPhase>> = {
   PreToolUse: 'pre-tool',
@@ -82,7 +82,7 @@ export const claudeCodeHookProtocol: HookProtocol = {
     const phase = PHASE_BY_EVENT[String(payload.hook_event_name)];
     if (!phase) return null;
     const toolInput = (payload.tool_input ?? {}) as Record<string, unknown>;
-    const filePath = toolInput.file_path ?? toolInput.path;
+    const filePath = toolInput.file_path ?? toolInput.notebook_path ?? toolInput.path;
     const transcriptPath = typeof payload.transcript_path === 'string' ? payload.transcript_path : undefined;
     const event: ToolEvent = {
       phase,
