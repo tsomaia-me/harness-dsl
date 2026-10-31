@@ -162,33 +162,36 @@ describe('First-Party Plugins & Head MCP Server', () => {
       'utf8',
     );
 
-    const preRes1 = await fetch(`${orch.mcpServer.url}/internal/hook?event=PreToolUse&runId=run-A`, {
+    const preRes1 = await fetch(`${orch.mcpServer.url}/internal/hook?runId=run-A`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
+        hook_event_name: 'PreToolUse',
         transcript_path: agentTranscriptPath,
+        tool_name: 'Edit',
         tool_input: { file_path: path.join(repoDir, 'apps/edge/wallet.ts') },
       }),
     }).then((r) => r.json() as Promise<Record<string, any>>);
-    expect.soft(preRes1.decision).toBe('approve');
+    expect.soft(preRes1).toStrictEqual({});
     expect.soft(orch.store.getRunContextTokens('run-A')).toBe(195_000);
     expect.soft(orch.store.getActiveHeadSession()).toBeNull();
 
-    const preRes2 = await fetch(`${orch.mcpServer.url}/internal/hook?event=PreToolUse&runId=run-B`, {
+    const preRes2 = await fetch(`${orch.mcpServer.url}/internal/hook?runId=run-B`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
+        hook_event_name: 'PreToolUse',
         transcript_path: agentTranscriptPath,
+        tool_name: 'Edit',
         tool_input: { file_path: path.join(repoDir, 'apps/edge/wallet.ts') },
       }),
     }).then((r) => r.json() as Promise<Record<string, any>>);
-    expect.soft(preRes2.decision).toBe('block');
     expect.soft(preRes2.hookSpecificOutput?.permissionDecision).toBe('deny');
 
-    const stopBlocked = await fetch(`${orch.mcpServer.url}/internal/hook?event=Stop&runId=run-A`, {
+    const stopBlocked = await fetch(`${orch.mcpServer.url}/internal/hook?runId=run-A`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ transcript_path: agentTranscriptPath }),
+      body: JSON.stringify({ hook_event_name: 'Stop', transcript_path: agentTranscriptPath }),
     }).then((r) => r.json() as Promise<Record<string, any>>);
     expect.soft(stopBlocked).toEqual({
       decision: 'block',
@@ -196,12 +199,12 @@ describe('First-Party Plugins & Head MCP Server', () => {
     });
 
     writeFileSync(path.join(repoDir, 'ready.txt'), 'ok', 'utf8');
-    const stopAllowed = await fetch(`${orch.mcpServer.url}/internal/hook?event=Stop&runId=run-A`, {
+    const stopAllowed = await fetch(`${orch.mcpServer.url}/internal/hook?runId=run-A`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ hook_event_name: 'Stop' }),
     }).then((r) => r.json() as Promise<Record<string, any>>);
-    expect.soft(stopAllowed.decision).toBe('approve');
+    expect.soft(stopAllowed).toStrictEqual({});
 
     const transcriptPath = path.join(repoDir, 'head-transcript.jsonl');
     writeFileSync(

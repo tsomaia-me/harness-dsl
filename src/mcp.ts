@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { closeSync, existsSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
@@ -8,53 +8,10 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { z } from 'zod';
 import type { HeadDef } from './dsl.js';
 import { FlowEngine } from './engine.js';
+import { HOOK_PATH } from './hooks.js';
 import { LocalRunner } from './runner.js';
 import { type HarnessStore, sumCosts } from './store.js';
 import type { AgentPlugin, Executable, ExecutionContext } from './types.js';
-
-export function readTranscriptContextTokens(transcriptPath: string): number {
-  if (!existsSync(transcriptPath)) return 0;
-  try {
-    const stat = statSync(transcriptPath);
-    const readSize = Math.min(stat.size, 65_536);
-    const offset = Math.max(0, stat.size - readSize);
-    const buf = Buffer.alloc(readSize);
-    const fd = openSync(transcriptPath, 'r');
-    try {
-      readSync(fd, buf, 0, readSize, offset);
-    } finally {
-      closeSync(fd);
-    }
-    const lines = buf
-      .toString('utf8')
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.startsWith('{'));
-
-    let latestTotal = 0;
-    for (const line of lines) {
-      try {
-        const parsed = JSON.parse(line) as Record<string, any>;
-        const usage = parsed.message?.usage ?? parsed.usage;
-        if (usage && typeof usage === 'object') {
-          const total =
-            Number(usage.input_tokens ?? 0) +
-            Number(usage.cache_creation_input_tokens ?? 0) +
-            Number(usage.cache_read_input_tokens ?? 0) +
-            Number(usage.output_tokens ?? 0);
-          if (total > 0) {
-            latestTotal = total;
-          }
-        }
-      } catch (err) {
-        void err;
-      }
-    }
-    return latestTotal;
-  } catch {
-    return 0;
-  }
-}
 
 export class HarnessMcpServer {
   public readonly headDef: HeadDef;
@@ -148,7 +105,7 @@ export class HarnessMcpServer {
   private formatMcpResult(payload: Record<string, unknown>) {
     const activeHead = this.store.getActiveHeadSession();
     if (activeHead?.transcriptPath) {
-      const tokens = readTranscriptContextTokens(activeHead.transcriptPath);
+      const tokens = this.headDef.transcriptReaderFn(activeHead.transcriptPath);
       if (tokens > 0 && tokens !== activeHead.contextTokens) {
         this.store.upsertHeadSession({
           sessionId: activeHead.sessionId,
@@ -198,7 +155,7 @@ export class HarnessMcpServer {
         const priorHandoffNote = existing?.handoffNote ?? null;
         const sessionId = args.sessionId ?? existing?.sessionId ?? `head-${randomUUID()}`;
         const contextTokens = args.transcriptPath
-          ? readTranscriptContextTokens(args.transcriptPath)
+          ? this.headDef.transcriptReaderFn(args.transcriptPath)
           : (existing?.contextTokens ?? 0);
 
         this.store.upsertHeadSession({
@@ -623,7 +580,7 @@ export class HarnessMcpServer {
   private async handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const parsedUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
 
-    if (parsedUrl.pathname === '/internal/hook' && req.method === 'POST') {
+    if (parsedUrl.pathname === HOOK_PATH && req.method === 'POST') {
       const bodyText = await this.readBody(req);
       let payload: Record<string, unknown> = {};
       if (bodyText.trim().length > 0) {
@@ -633,10 +590,11 @@ export class HarnessMcpServer {
           void err;
         }
       }
-      const event = parsedUrl.searchParams.get('event') ?? String(payload.hook_event_name ?? '');
-      const runId = parsedUrl.searchParams.get('runId') ?? '';
-
-      const responseJson = await this.handleHookCallback(event, runId, payload);
+      const responseJson = await this.handleHookCallback(
+        parsedUrl.searchParams.get('protocol'),
+        parsedUrl.searchParams.get('runId') ?? '',
+        payload,
+      );
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(responseJson));
       return;
@@ -659,85 +617,56 @@ export class HarnessMcpServer {
   }
 
   public async handleHookCallback(
-    event: string,
+    protocolName: string | null,
     runId: string,
     payload: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    if (typeof payload.transcript_path === 'string') {
-      const tokens = readTranscriptContextTokens(payload.transcript_path);
-      if (runId.length > 0) {
-        if (tokens > 0) {
-          this.store.setRunContextTokens(runId, tokens);
-        }
-      } else {
-        const sessionId =
-          typeof payload.session_id === 'string' ? payload.session_id : 'head-session';
-        if (tokens > 0) {
-          this.store.upsertHeadSession({
-            sessionId,
-            transcriptPath: payload.transcript_path,
-            contextTokens: tokens,
-          });
-        }
-        if (tokens >= this.headDef.contextNoticeThresholdTokens) {
-          return {
-            hookSpecificOutput: {
-              hookEventName: event || 'PostToolUse',
-              additionalContext: `Head context usage (${tokens} tokens) crossed threshold (${this.headDef.contextNoticeThresholdTokens}). Call harness_handoff({ note }) and compact or rotate.`,
-            },
-          };
-        }
+    const protocol = protocolName
+      ? this.headDef.hookProtocols.get(protocolName)
+      : this.headDef.hookProtocols.values().next().value;
+    const event = protocol?.parse(payload);
+    if (!protocol || !event) return {};
+
+    const tokens = event.contextTokens ?? 0;
+    if (runId.length > 0) {
+      if (tokens > 0) this.store.setRunContextTokens(runId, tokens);
+    } else {
+      if (tokens > 0) {
+        this.store.upsertHeadSession({
+          sessionId: event.sessionId ?? 'head-session',
+          transcriptPath: event.transcriptPath,
+          contextTokens: tokens,
+        });
+      }
+      if (tokens >= this.headDef.contextNoticeThresholdTokens) {
+        return protocol.formatDecision(event, {
+          allow: true,
+          additionalContext: `Head context usage (${tokens} tokens) crossed threshold (${this.headDef.contextNoticeThresholdTokens}). Call harness_handoff({ note }) and compact or rotate.`,
+        });
       }
     }
 
     const active = this.activeRunPlugins.get(runId);
-    const plugins = active?.plugins ?? [];
-    const workDir = active?.workDir ?? this.store.projectDir;
-
-    if (event === 'PreToolUse') {
-      for (const plugin of plugins) {
-        if (plugin.onPreToolUse) {
-          const decision = await plugin.onPreToolUse(payload, {
-            runId,
-            store: this.store,
-            workDir,
-          });
-          if (!decision.allow) {
-            return {
-              decision: 'block',
-              reason: decision.reason ?? `Blocked by ${plugin.name}`,
-              hookSpecificOutput: {
-                hookEventName: 'PreToolUse',
-                permissionDecision: 'deny',
-                permissionDecisionReason: decision.reason ?? `Blocked by ${plugin.name}`,
-              },
-            };
-          }
-        }
+    const ctx = { runId, store: this.store, workDir: active?.workDir ?? this.store.projectDir };
+    for (const plugin of active?.plugins ?? []) {
+      const handler =
+        event.phase === 'pre-tool'
+          ? event.intent !== null && plugin.preTool?.intents.includes(event.intent)
+            ? plugin.preTool
+            : undefined
+          : event.phase === 'stop'
+            ? plugin.stop
+            : undefined;
+      if (!handler) continue;
+      const decision = await handler.handle(event, ctx);
+      if (!decision.allow) {
+        return protocol.formatDecision(event, {
+          allow: false,
+          reason: decision.reason ?? `Blocked by ${plugin.name}`,
+        });
       }
-      return { decision: 'approve' };
     }
-
-    if (event === 'Stop') {
-      for (const plugin of plugins) {
-        if (plugin.onStop) {
-          const decision = await plugin.onStop(payload, {
-            runId,
-            store: this.store,
-            workDir,
-          });
-          if (!decision.allow) {
-            return {
-              decision: 'block',
-              reason: decision.reason ?? `Stop blocked by ${plugin.name}`,
-            };
-          }
-        }
-      }
-      return { decision: 'approve' };
-    }
-
-    return { ok: true };
+    return protocol.formatDecision(event, { allow: true });
   }
 
   private readBody(req: IncomingMessage): Promise<string> {

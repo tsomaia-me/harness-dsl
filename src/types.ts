@@ -91,8 +91,9 @@ export interface DriverInvokeRequest {
   readonly allowedTools?: readonly string[];
   readonly customTools?: ReadonlyMap<string, Executable<any, any>>;
   readonly maxContextTokens?: number;
+  readonly handoffBufferTokens?: number;
   readonly hookServerUrl?: string;
-  readonly hookTypes?: readonly ('PreToolUse' | 'PostToolUse' | 'Stop')[];
+  readonly hookSubscriptions?: HookSubscriptions;
   readonly runId: string;
   readonly stepName: string;
   readonly sessionId?: string;
@@ -190,17 +191,51 @@ export interface Runner {
   syncGitRef?(localWorkDir: string, sha: string, targetRef: string): Promise<void>;
 }
 
+export type ToolEventPhase = 'pre-tool' | 'post-tool' | 'stop';
+
+export type ToolIntent = 'file-write';
+
+export interface ToolEvent {
+  readonly phase: ToolEventPhase;
+  readonly intent: ToolIntent | null;
+  readonly filePaths: readonly string[];
+  readonly sessionId?: string;
+  readonly transcriptPath?: string;
+  readonly contextTokens?: number;
+}
+
+export interface HookDecision {
+  readonly allow: boolean;
+  readonly reason?: string;
+  readonly additionalContext?: string;
+}
+
+export interface HookSubscriptions {
+  readonly preToolIntents: readonly ToolIntent[];
+  readonly stop: boolean;
+}
+
+export interface HookProtocol {
+  readonly name: string;
+  buildSettings(endpoint: string, subscriptions: HookSubscriptions): Record<string, unknown>;
+  parse(payload: Record<string, unknown>): ToolEvent | null;
+  formatDecision(event: ToolEvent, decision: HookDecision): Record<string, unknown>;
+}
+
+export interface PluginContext {
+  readonly runId: string;
+  readonly store: HarnessStore;
+  readonly workDir: string;
+}
+
+export interface PluginHandler {
+  handle(event: ToolEvent, ctx: PluginContext): Promise<HookDecision>;
+}
+
 export interface AgentPlugin {
   readonly name: string;
-  readonly hookTypes?: readonly ('PreToolUse' | 'PostToolUse' | 'Stop')[];
-  onPreToolUse?(
-    payload: Record<string, unknown>,
-    ctx: { runId: string; store: HarnessStore; workDir: string },
-  ): Promise<{ allow: boolean; reason?: string }>;
-  onStop?(
-    payload: Record<string, unknown>,
-    ctx: { runId: string; store: HarnessStore; workDir: string },
-  ): Promise<{ allow: boolean; reason?: string }>;
+  readonly preTool?: PluginHandler & { readonly intents: readonly ToolIntent[] };
+  readonly stop?: PluginHandler;
 }
 
 export interface FlowMiddleware {

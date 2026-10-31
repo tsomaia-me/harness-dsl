@@ -37,11 +37,9 @@ export {
   type FlowRunResult,
   MaxIterationsReachedError,
 } from './engine.js';
-export {
-  HarnessMcpServer,
-  readTranscriptContextTokens,
-  startOrchestrator,
-} from './mcp.js';
+export { HOOK_PATH, hookEndpointUrl } from './hooks.js';
+export { HarnessMcpServer, startOrchestrator } from './mcp.js';
+export { claudeCodeHookProtocol, readClaudeCodeTranscriptTokens } from './protocols/claude-code.js';
 export {
   AccountDef,
   DEFAULT_QUOTA_POLICY,
@@ -90,6 +88,11 @@ export {
 export type {
   AccountProvider,
   AgentPlugin,
+  HookDecision,
+  HookProtocol,
+  HookSubscriptions,
+  PluginContext,
+  PluginHandler,
   BatchAdapter,
   BatchItemRequest,
   BatchItemResult,
@@ -114,4 +117,7 @@ export type {
   Runner,
   TokenCounts,
   TokenUsage,
+  ToolEvent,
+  ToolEventPhase,
+  ToolIntent,
 } from './types.js';

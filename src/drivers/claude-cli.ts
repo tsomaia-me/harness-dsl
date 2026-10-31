@@ -3,7 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { hookEndpointUrl } from '../hooks.js';
 import { anthropicPricing } from '../pricing/anthropic.js';
+import { claudeCodeHookProtocol } from '../protocols/claude-code.js';
 import { RateLimitedError } from '../quota.js';
 import {
   CLAUDE_CLI_RATE_LIMIT_TEXT,
@@ -79,33 +81,6 @@ export class ClaudeCliDriver implements Driver {
     this.probeQuota = opts?.probeQuota;
   }
 
-  public buildHookSettingsJson(
-    hookServerUrl: string,
-    runId: string,
-    hookTypes: readonly ('PreToolUse' | 'PostToolUse' | 'Stop')[],
-  ): Record<string, unknown> {
-    const hooksObj: Record<string, unknown[]> = {};
-    for (const hookType of hookTypes) {
-      const endpoint = `${hookServerUrl.replace(/\/$/, '')}/internal/hook?event=${hookType}&runId=${encodeURIComponent(runId)}`;
-      const cmd = `curl -sS -X POST "${endpoint}" -H "content-type: application/json" --data-binary @-`;
-      if (hookType === 'PreToolUse') {
-        hooksObj.PreToolUse = [
-          {
-            matcher: 'Edit|Write|MultiEdit',
-            hooks: [{ type: 'command', command: cmd }],
-          },
-        ];
-      } else {
-        hooksObj[hookType] = [
-          {
-            hooks: [{ type: 'command', command: cmd }],
-          },
-        ];
-      }
-    }
-    return { hooks: hooksObj };
-  }
-
   public buildCliArgs(
     req: DriverInvokeRequest,
     sessionId: string,
@@ -158,17 +133,17 @@ export class ClaudeCliDriver implements Driver {
     let settingsFilePath: string | undefined;
     let mcpConfigFilePath: string | undefined;
 
-    if (req.hookServerUrl && req.hookTypes && req.hookTypes.length > 0) {
+    const subscriptions = req.hookSubscriptions;
+    if (req.hookServerUrl && subscriptions && (subscriptions.preToolIntents.length > 0 || subscriptions.stop)) {
       const settingsDir = path.join(tmpdir(), 'harness-cli-settings');
       mkdirSync(settingsDir, { recursive: true });
       settingsFilePath = path.join(
         settingsDir,
         `settings-${req.runId}-${req.stepName}-${randomUUID()}.json`,
       );
-      const settingsPayload = this.buildHookSettingsJson(
-        req.hookServerUrl,
-        req.runId,
-        req.hookTypes,
+      const settingsPayload = claudeCodeHookProtocol.buildSettings(
+        hookEndpointUrl(req.hookServerUrl, claudeCodeHookProtocol.name, req.runId),
+        subscriptions,
       );
       writeFileSync(settingsFilePath, JSON.stringify(settingsPayload, null, 2), 'utf8');
     }
@@ -231,7 +206,10 @@ export class ClaudeCliDriver implements Driver {
           outputTokens = Math.max(outputTokens, outTok);
 
           const totalContext = inTok + cacheCreate + cacheRead + outTok;
-          if (req.maxContextTokens && totalContext >= req.maxContextTokens - 30_000) {
+          if (
+            req.maxContextTokens &&
+            totalContext >= req.maxContextTokens - (req.handoffBufferTokens ?? 0)
+          ) {
             handoffTriggered = true;
           }
         }

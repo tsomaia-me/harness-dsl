@@ -4,6 +4,7 @@ import path from 'node:path';
 import { parseEnv } from 'node:util';
 import { z } from 'zod';
 import { drivers } from './drivers/index.js';
+import { claudeCodeHookProtocol, readClaudeCodeTranscriptTokens } from './protocols/claude-code.js';
 import { AccountDef, PoolDef, RateLimitedError } from './quota.js';
 import { LocalRunner, type LocalRunnerOptions, SshRunner, type SshRunnerOptions } from './runner.js';
 import type {
@@ -17,6 +18,8 @@ import type {
   FlowContext,
   FlowMiddleware,
   HeadCapability,
+  HookProtocol,
+  HookSubscriptions,
   PricingAdapter,
   Runner,
   TokenUsage,
@@ -364,9 +367,10 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
     const baseUserPrompt = this.buildUserPrompt(parsedInput);
     const outputJsonSchema = this.getOutputJsonSchema();
 
-    const hookTypes = Array.from(
-      new Set(this.agent.plugins.flatMap((p) => p.hookTypes ?? [])),
-    ) as ('PreToolUse' | 'PostToolUse' | 'Stop')[];
+    const hookSubscriptions: HookSubscriptions = {
+      preToolIntents: [...new Set(this.agent.plugins.flatMap((p) => p.preTool?.intents ?? []))],
+      stop: this.agent.plugins.some((p) => p.stop !== undefined),
+    };
 
     let attempt = 0;
     let validationFeedback = '';
@@ -406,8 +410,9 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
           allowedTools: this.agent.allowedTools,
           customTools: this.agent.customTools,
           maxContextTokens: this.agent.maxContextTokensLimit,
+          handoffBufferTokens: this.agent.handoffBufferTokensValue,
           hookServerUrl: ctx.hookServerUrl,
-          hookTypes,
+          hookSubscriptions,
           runId: ctx.runId,
           stepName: ctx.stepName,
           sessionId: currentSessionId,
@@ -525,6 +530,8 @@ class SchemaValidationError extends Error {
   }
 }
 
+export const DEFAULT_HANDOFF_BUFFER_TOKENS = 30_000;
+
 export class AgentDef {
   public readonly name: string;
   public readonly modelDef?: ModelDef;
@@ -535,6 +542,7 @@ export class AgentDef {
   public readonly allowedTools: readonly string[];
   public readonly customTools: ReadonlyMap<string, Executable<any, any>>;
   public readonly plugins: readonly AgentPlugin[];
+  public readonly handoffBufferTokensValue: number;
 
   public constructor(
     name: string,
@@ -547,6 +555,7 @@ export class AgentDef {
       allowedTools?: readonly string[];
       customTools?: ReadonlyMap<string, Executable<any, any>>;
       plugins?: readonly AgentPlugin[];
+      handoffBufferTokensValue?: number;
     },
   ) {
     this.name = name;
@@ -558,6 +567,7 @@ export class AgentDef {
     this.allowedTools = opts?.allowedTools ?? [];
     this.customTools = opts?.customTools ?? new Map();
     this.plugins = opts?.plugins ?? [];
+    this.handoffBufferTokensValue = opts?.handoffBufferTokensValue ?? DEFAULT_HANDOFF_BUFFER_TOKENS;
   }
 
   public model(modelDef: ModelDef): AgentDef {
@@ -570,6 +580,7 @@ export class AgentDef {
       allowedTools: this.allowedTools,
       customTools: this.customTools,
       plugins: this.plugins,
+      handoffBufferTokensValue: this.handoffBufferTokensValue,
     });
   }
 
@@ -583,6 +594,21 @@ export class AgentDef {
       allowedTools: this.allowedTools,
       customTools: this.customTools,
       plugins: this.plugins,
+      handoffBufferTokensValue: this.handoffBufferTokensValue,
+    });
+  }
+
+  public handoffBuffer(tokens: number): AgentDef {
+    return new AgentDef(this.name, {
+      modelDef: this.modelDef,
+      maxContextTokensLimit: this.maxContextTokensLimit,
+      inactivityTimeoutMsValue: this.inactivityTimeoutMsValue,
+      promptText: this.promptText,
+      promptFilePath: this.promptFilePath,
+      allowedTools: this.allowedTools,
+      customTools: this.customTools,
+      plugins: this.plugins,
+      handoffBufferTokensValue: tokens,
     });
   }
 
@@ -596,6 +622,7 @@ export class AgentDef {
       allowedTools: this.allowedTools,
       customTools: this.customTools,
       plugins: this.plugins,
+      handoffBufferTokensValue: this.handoffBufferTokensValue,
     });
   }
 
@@ -609,6 +636,7 @@ export class AgentDef {
       allowedTools: this.allowedTools,
       customTools: this.customTools,
       plugins: this.plugins,
+      handoffBufferTokensValue: this.handoffBufferTokensValue,
     });
   }
 
@@ -622,6 +650,7 @@ export class AgentDef {
       allowedTools: this.allowedTools,
       customTools: this.customTools,
       plugins: this.plugins,
+      handoffBufferTokensValue: this.handoffBufferTokensValue,
     });
   }
 
@@ -635,6 +664,7 @@ export class AgentDef {
       allowedTools: [...toolNames],
       customTools: this.customTools,
       plugins: this.plugins,
+      handoffBufferTokensValue: this.handoffBufferTokensValue,
     });
   }
 
@@ -650,6 +680,7 @@ export class AgentDef {
       allowedTools: this.allowedTools,
       customTools: nextMap,
       plugins: this.plugins,
+      handoffBufferTokensValue: this.handoffBufferTokensValue,
     });
   }
 
@@ -663,6 +694,7 @@ export class AgentDef {
       allowedTools: this.allowedTools,
       customTools: this.customTools,
       plugins: [...this.plugins, plugin],
+      handoffBufferTokensValue: this.handoffBufferTokensValue,
     });
   }
 
@@ -1082,6 +1114,8 @@ export class HeadDef {
   public readonly listenPort: number;
   public readonly customTools: ReadonlyMap<string, Executable<any, any>>;
   public readonly flows: ReadonlyMap<string, FlowDef<any, any>>;
+  public readonly hookProtocols: ReadonlyMap<string, HookProtocol>;
+  public readonly transcriptReaderFn: (transcriptPath: string) => number;
 
   public constructor(opts?: {
     capabilitySet?: ReadonlySet<HeadCapability>;
@@ -1089,12 +1123,17 @@ export class HeadDef {
     listenPort?: number;
     customTools?: ReadonlyMap<string, Executable<any, any>>;
     flows?: ReadonlyMap<string, FlowDef<any, any>>;
+    hookProtocols?: ReadonlyMap<string, HookProtocol>;
+    transcriptReaderFn?: (transcriptPath: string) => number;
   }) {
     this.capabilitySet = opts?.capabilitySet ?? new Set<HeadCapability>();
     this.contextNoticeThresholdTokens = opts?.contextNoticeThresholdTokens ?? 180_000;
     this.listenPort = opts?.listenPort ?? 4100;
     this.customTools = opts?.customTools ?? new Map();
     this.flows = opts?.flows ?? new Map();
+    this.hookProtocols =
+      opts?.hookProtocols ?? new Map([[claudeCodeHookProtocol.name, claudeCodeHookProtocol]]);
+    this.transcriptReaderFn = opts?.transcriptReaderFn ?? readClaudeCodeTranscriptTokens;
   }
 
   public capabilities(caps: readonly HeadCapability[]): HeadDef {
@@ -1104,6 +1143,8 @@ export class HeadDef {
       listenPort: this.listenPort,
       customTools: this.customTools,
       flows: this.flows,
+      hookProtocols: this.hookProtocols,
+      transcriptReaderFn: this.transcriptReaderFn,
     });
   }
 
@@ -1114,6 +1155,8 @@ export class HeadDef {
       listenPort: this.listenPort,
       customTools: this.customTools,
       flows: this.flows,
+      hookProtocols: this.hookProtocols,
+      transcriptReaderFn: this.transcriptReaderFn,
     });
   }
 
@@ -1124,6 +1167,8 @@ export class HeadDef {
       listenPort,
       customTools: this.customTools,
       flows: this.flows,
+      hookProtocols: this.hookProtocols,
+      transcriptReaderFn: this.transcriptReaderFn,
     });
   }
 
@@ -1136,6 +1181,34 @@ export class HeadDef {
       listenPort: this.listenPort,
       customTools: next,
       flows: this.flows,
+      hookProtocols: this.hookProtocols,
+      transcriptReaderFn: this.transcriptReaderFn,
+    });
+  }
+
+  public hookProtocol(protocol: HookProtocol): HeadDef {
+    const next = new Map(this.hookProtocols);
+    next.set(protocol.name, protocol);
+    return new HeadDef({
+      capabilitySet: this.capabilitySet,
+      contextNoticeThresholdTokens: this.contextNoticeThresholdTokens,
+      listenPort: this.listenPort,
+      customTools: this.customTools,
+      flows: this.flows,
+      hookProtocols: next,
+      transcriptReaderFn: this.transcriptReaderFn,
+    });
+  }
+
+  public transcriptReader(reader: (transcriptPath: string) => number): HeadDef {
+    return new HeadDef({
+      capabilitySet: this.capabilitySet,
+      contextNoticeThresholdTokens: this.contextNoticeThresholdTokens,
+      listenPort: this.listenPort,
+      customTools: this.customTools,
+      flows: this.flows,
+      hookProtocols: this.hookProtocols,
+      transcriptReaderFn: reader,
     });
   }
 
@@ -1148,6 +1221,8 @@ export class HeadDef {
       listenPort: this.listenPort,
       customTools: this.customTools,
       flows: next,
+      hookProtocols: this.hookProtocols,
+      transcriptReaderFn: this.transcriptReaderFn,
     });
   }
 }
