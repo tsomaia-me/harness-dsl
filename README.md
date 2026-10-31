@@ -1,4 +1,4 @@
-# `@tsomaia/harness-dsl`
+# `harness-dsl`
 
 Strongly-typed TypeScript orchestration DSL (`H.*`) for composing deterministic shell commands, schema-validated AI agent skills, reactive multi-account subscription/API pools, and an interactive Head MCP server.
 
@@ -12,7 +12,7 @@ Strongly-typed TypeScript orchestration DSL (`H.*`) for composing deterministic 
 - **50% Discount Cloud Batching (`H.batch`)** — Automatically routes multi-item batch steps to the Anthropic Message Batches API (`/v1/messages/batches`) with prompt caching when backed by an `ai-sdk` Anthropic driver, or executes concurrently via `p-queue` for CLI/command steps.
 - **Process-Group & SSH Containment (`H.runner`)** — Local and agentless SSH runners (`ControlMaster` multiplexing + `setsid` process groups) with deterministic per-slot port allocation (`PORT`, `PORT_API`, `PORT_WEB`), inactivity watchdogs, and remote CPU/disk pre-flight health checks.
 - **Scoped Institutional Memory (`.harness/lessons.jsonl`)** — Append-only JSONL lesson store with Jaccard similarity deduplication, filtered automatically by agent role and `picomatch` file globs before prompt injection.
-- **First-Party Plugins (`@tsomaia/harness-dsl/plugins`)** — Git worktree isolation per run (`gitWorktreeIsolation`), cross-run exclusive file leases (`fileLeaseGuard`), and mechanical verification gates on agent completion (`stopCommandHook`).
+- **First-Party Plugins (`harness-dsl/plugins`)** — Git worktree isolation per run (`gitWorktreeIsolation`), cross-run exclusive file leases (`fileLeaseGuard`), and mechanical verification gates on agent completion (`stopCommandHook`).
 - **Streamable HTTP MCP Server (`H.head` & `startOrchestrator`)** — Exposes live queue, blocker resolution, ticket CRUD, lesson management, quota share controls, telemetry, and custom agent/command tools to your interactive Claude Code Head session over `/mcp`.
 
 ---
@@ -20,7 +20,7 @@ Strongly-typed TypeScript orchestration DSL (`H.*`) for composing deterministic 
 ## Installation
 
 ```bash
-pnpm add @tsomaia/harness-dsl zod
+pnpm add harness-dsl zod
 ```
 
 Requires **Node.js >= 22**.
@@ -30,12 +30,12 @@ Requires **Node.js >= 22**.
 ## Quickstart
 
 ```ts
-import { H, startOrchestrator, z } from '@tsomaia/harness-dsl';
+import { H, startOrchestrator, z } from 'harness-dsl';
 import {
   fileLeaseGuard,
   gitWorktreeIsolation,
   stopCommandHook,
-} from '@tsomaia/harness-dsl/plugins';
+} from 'harness-dsl/plugins';
 
 const SubsPool = H.pool('claude-subs', [
   H.account('sub-1', H.drivers.claudeCli({ configDir: '~/.claude' })).maxQuotaShare(0.5),
@@ -192,7 +192,7 @@ const orchestrator = await startOrchestrator({
 
 ---
 
-## First-Party Plugins (`@tsomaia/harness-dsl/plugins`)
+## First-Party Plugins (`harness-dsl/plugins`)
 
 | Plugin | Scope | Description |
 | :--- | :--- | :--- |

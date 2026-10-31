@@ -1,4 +1,4 @@
-# Harness DSL (`@tsomaia/harness-dsl`) — Technical Design Document
+# Harness DSL (`harness-dsl`) — Technical Design Document
 
 ## §1. Package Layout & Dependencies
 
@@ -28,7 +28,7 @@
       custom.ts             # User-supplied function / command driver wrapper
       mock.ts               # Deterministic in-memory driver for unit & failure-injection tests
     plugins/
-      index.ts              # Public plugin exports (`@tsomaia/harness-dsl/plugins`)
+      index.ts              # Public plugin exports (`harness-dsl/plugins`)
       worktree.ts           # gitWorktreeIsolation() middleware using simple-git
       file-lease.ts         # fileLeaseGuard() PreToolUse hook plugin using picomatch
       stop-command.ts       # stopCommandHook() Stop hook plugin
@@ -43,7 +43,7 @@ The framework delegates generic infrastructure concerns to maintained MIT/Apache
 
 ```json
 {
-  "name": "@tsomaia/harness-dsl",
+  "name": "harness-dsl",
   "version": "0.1.0",
   "type": "module",
   "exports": {

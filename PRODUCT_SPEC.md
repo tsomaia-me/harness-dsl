@@ -1,10 +1,10 @@
-# Harness DSL (`@tsomaia/harness-dsl`) — Product Specification
+# Harness DSL (`harness-dsl`) — Product Specification
 
 ## §0. Purpose & Design Principles
 
-`@tsomaia/harness-dsl` (exported under the namespace `H`) is a domain-agnostic TypeScript framework for declaring, executing, and observing deterministic workflows with LLMs in the loop.
+`harness-dsl` (exported under the namespace `H`) is a domain-agnostic TypeScript framework for declaring, executing, and observing deterministic workflows with LLMs in the loop.
 
-1. **Zero Domain Opinions in Core:** The framework core knows nothing about specific project roles ("Builder", "Auditor", "Visual Judge", "Arbiter"), project artifacts ("PRs", "Screens"), or programming languages. It provides the declarative primitives (`H.account`, `H.pool`, `H.model`, `H.runner`, `H.command`, `H.skill`, `H.agent`, `H.flow`, `H.head`) to compose any workflow. Project-specific patterns live in userland orchestrator packages or optional first-party plugins (`@tsomaia/harness-dsl/plugins`).
+1. **Zero Domain Opinions in Core:** The framework core knows nothing about specific project roles ("Builder", "Auditor", "Visual Judge", "Arbiter"), project artifacts ("PRs", "Screens"), or programming languages. It provides the declarative primitives (`H.account`, `H.pool`, `H.model`, `H.runner`, `H.command`, `H.skill`, `H.agent`, `H.flow`, `H.head`) to compose any workflow. Project-specific patterns live in userland orchestrator packages or optional first-party plugins (`harness-dsl/plugins`).
 2. **Everything Is a Stateless, Typed Descriptor:** Every construct created with `H.*` is an immutable, stateless blueprint backed by Zod input and output schemas. Any `Executable<TInput, TOutput>` (`H.command`, `H.agent` bound to an `H.skill`, or sub-`H.flow`) can be wired into a pipeline step, a conditional branch, a loop, a batch job, an agent tool, or an MCP tool exposed to `Head`.
 3. **Deterministic State Machine Outside, Bounded LLMs Inside:** Workflow state, loops, retries, file leases, process lifecycles, and quota scheduling are executed deterministically by the Node.js runtime backed by SQLite. LLMs are invoked strictly as stateless or bounded-context functions that return Zod-validated outputs.
 4. **Provider & Transport Agnostic:** Workflows bind to `H.model`, never to a hardcoded vendor CLI or SDK. A model can run over a multi-account CLI subscription pool (`claude -p`), a real-time SDK (`@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/openai`), a cloud Batch API (50% discount), or a custom user function without changing a single line of flow logic.
@@ -24,7 +24,7 @@ Both `H.account` and `H.pool` implement the `AccountProvider` interface (Composi
   - Declared on an `H.pool`, `.maxQuotaShare(0.60)` sets the default cap for accounts in the pool (individual account caps override or tighten the pool cap).
 
 ```typescript
-import { H, z } from '@tsomaia/harness-dsl';
+import { H, z } from 'harness-dsl';
 
 const AcctMain    = H.account('claude-main',    H.drivers.claudeCli({ configDir: '~/.claude' })).maxQuotaShare(0.75);
 const AcctGoogle  = H.account('claude-google',  H.drivers.claudeCli({ configDir: '~/.claude-google' })).maxQuotaShare(0.75);
@@ -240,8 +240,8 @@ All mutable runtime state lives in `.harness/runtime.db` (SQLite, gitignored). O
 ## §4. Complete Userland Composition Example (Builder + Auditor + Opt-In Dispute Arbiter)
 
 ```typescript
-import { H, z } from '@tsomaia/harness-dsl';
-import { gitWorktreeIsolation, fileLeaseGuard, stopCommandHook } from '@tsomaia/harness-dsl/plugins';
+import { H, z } from 'harness-dsl';
+import { gitWorktreeIsolation, fileLeaseGuard, stopCommandHook } from 'harness-dsl/plugins';
 import { Opus, Sonnet, LocalRunner, Wb2Runner, ComputePool, Head } from './infra.js';
 
 const CriterionSchema = z.object({ id: z.string(), text: z.string() });
