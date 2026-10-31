@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { eq } from 'drizzle-orm';
@@ -8,13 +16,15 @@ import picomatch from 'picomatch';
 import { z } from 'zod';
 import {
   accountQuotas,
+  accountQuotaWindows,
   BOOTSTRAP_SQL,
   fileLeases,
   headSessions,
   invocations,
+  SCHEMA_VERSION,
   workflowRuns,
 } from './schema.js';
-import type { LessonEntry, QuotaSnapshot } from './types.js';
+import type { LessonEntry, QuotaPatch, QuotaPolicy, QuotaWindow } from './types.js';
 
 export const LessonSchema = z.object({
   id: z.string().min(1),
@@ -56,6 +66,29 @@ export interface FinishInvocationInput {
   readonly equivalentCostUsd?: number;
   readonly output?: unknown;
   readonly errorText?: string;
+}
+
+export interface AccountQuotaState {
+  readonly accountId: string;
+  readonly windows: readonly QuotaWindow[];
+  readonly projectShareUsed: number;
+  readonly windowTokensUsed: number;
+  readonly cooldownUntilMs: number | null;
+  readonly probedAtMs: number | null;
+  readonly acquiredAtMs: number | null;
+}
+
+export interface AccountQuotaPatch extends QuotaPatch {
+  readonly projectShareUsed?: number;
+  readonly windowTokensUsed?: number;
+  readonly probedAtMs?: number | null;
+  readonly acquiredAtMs?: number | null;
+}
+
+function definedEntries<T extends Record<string, unknown>>(record: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(record).filter(([, value]) => value !== undefined),
+  ) as Partial<T>;
 }
 
 export interface TicketRecord {
@@ -112,6 +145,7 @@ export class HarnessStore {
   public readonly db: BetterSQLite3Database;
   private readonly blockerWaiters = new Map<string, (resolution: unknown) => void>();
   private readonly accountShareOverrides = new Map<string, number>();
+  private readonly quotaPolicies = new Map<string, QuotaPolicy>();
   private readonly runContextTokens = new Map<string, number>();
 
   public constructor(projectDir: string) {
@@ -124,11 +158,30 @@ export class HarnessStore {
     this.boardPath = path.join(this.harnessDir, 'BOARD.md');
     this.telemetryPath = path.join(this.harnessDir, 'TELEMETRY.md');
 
-    this.sqlite = new Database(this.dbPath);
+    this.sqlite = this.openCurrentSchemaDatabase();
     this.sqlite.pragma('journal_mode = WAL');
     this.sqlite.pragma('busy_timeout = 5000');
     this.sqlite.exec(BOOTSTRAP_SQL);
+    this.sqlite.pragma(`user_version = ${SCHEMA_VERSION}`);
     this.db = drizzle(this.sqlite);
+  }
+
+  private openCurrentSchemaDatabase(): Database.Database {
+    const existing = new Database(this.dbPath);
+    const version = Number(existing.pragma('user_version', { simple: true }));
+    const { tableCount } = existing
+      .prepare("SELECT count(*) AS tableCount FROM sqlite_master WHERE type = 'table'")
+      .get() as { tableCount: number };
+    if (version === SCHEMA_VERSION || tableCount === 0) {
+      return existing;
+    }
+    existing.pragma('wal_checkpoint(TRUNCATE)');
+    existing.close();
+    const backupPath = `${this.dbPath}.v${version}.bak`;
+    renameSync(this.dbPath, existsSync(backupPath) ? `${backupPath}.${Date.now()}` : backupPath);
+    rmSync(`${this.dbPath}-wal`, { force: true });
+    rmSync(`${this.dbPath}-shm`, { force: true });
+    return new Database(this.dbPath);
   }
 
   public close(): void {
@@ -154,6 +207,10 @@ export class HarnessStore {
 
   public getAccountShareOverride(accountId: string): number | undefined {
     return this.accountShareOverrides.get(accountId);
+  }
+
+  public registerQuotaPolicy(accountId: string, policy: QuotaPolicy): void {
+    this.quotaPolicies.set(accountId, policy);
   }
 
   public createRun(input: CreateRunInput): void {
@@ -305,19 +362,16 @@ export class HarnessStore {
     this.projectTelemetry();
   }
 
-  public recordAccountTokenUsage(
-    accountId: string,
-    tokensDelta: number,
-    windowTokenBudget = 5_000_000,
-  ): void {
+  public recordAccountTokenUsage(accountId: string, tokensDelta: number): void {
+    const tokens = Math.max(0, tokensDelta);
     const existing = this.getAccountQuota(accountId);
-    const prevTokens = existing?.windowTokensUsed ?? 0;
-    const nextTokens = prevTokens + Math.max(0, tokensDelta);
-    const shareDelta = Math.max(0, tokensDelta) / windowTokenBudget;
-    const nextShare = Math.min(1, (existing?.projectShareUsed ?? 0) + shareDelta);
+    const tokenBudget = this.quotaPolicies.get(accountId)?.tokenBudget ?? null;
     this.upsertAccountQuota(accountId, {
-      windowTokensUsed: nextTokens,
-      projectShareUsed: nextShare,
+      windowTokensUsed: (existing?.windowTokensUsed ?? 0) + tokens,
+      projectShareUsed:
+        tokenBudget === null
+          ? undefined
+          : Math.min(1, (existing?.projectShareUsed ?? 0) + tokens / tokenBudget),
     });
   }
 
@@ -328,61 +382,63 @@ export class HarnessStore {
     return this.db.select().from(invocations).all();
   }
 
-  public getAccountQuota(accountId: string) {
-    return (
-      this.db.select().from(accountQuotas).where(eq(accountQuotas.accountId, accountId)).get() ??
-      null
-    );
+  public getAccountQuota(accountId: string): AccountQuotaState | null {
+    const row = this.db
+      .select()
+      .from(accountQuotas)
+      .where(eq(accountQuotas.accountId, accountId))
+      .get();
+    return row ? { ...row, windows: this.listQuotaWindows(accountId) } : null;
   }
 
-  public listAccountQuotas() {
-    return this.db.select().from(accountQuotas).all();
+  public listAccountQuotas(): AccountQuotaState[] {
+    return this.db
+      .select()
+      .from(accountQuotas)
+      .all()
+      .map((row) => ({ ...row, windows: this.listQuotaWindows(row.accountId) }));
   }
 
-  public upsertAccountQuota(
-    accountId: string,
-    patch: Partial<QuotaSnapshot> & {
-      projectShareUsed?: number;
-      windowTokensUsed?: number;
-      updatedAtMs?: number;
-    },
-  ): void {
-    const existing = this.getAccountQuota(accountId);
-    const now = patch.updatedAtMs ?? Date.now();
-    if (!existing) {
-      this.db
-        .insert(accountQuotas)
-        .values({
-          accountId,
-          utilization5h: patch.utilization5h ?? 0,
-          utilization7d: patch.utilization7d ?? 0,
-          projectShareUsed: patch.projectShareUsed ?? 0,
-          windowTokensUsed: patch.windowTokensUsed ?? 0,
-          resets5hAtMs: patch.resets5hAtMs ?? null,
-          resets7dAtMs: patch.resets7dAtMs ?? null,
-          cooldownUntilMs: patch.cooldownUntilMs ?? null,
-          updatedAtMs: now,
-        })
-        .run();
-    } else {
-      this.db
-        .update(accountQuotas)
-        .set({
-          utilization5h: patch.utilization5h ?? existing.utilization5h,
-          utilization7d: patch.utilization7d ?? existing.utilization7d,
-          projectShareUsed: patch.projectShareUsed ?? existing.projectShareUsed,
-          windowTokensUsed: patch.windowTokensUsed ?? existing.windowTokensUsed,
-          resets5hAtMs:
-            patch.resets5hAtMs !== undefined ? patch.resets5hAtMs : existing.resets5hAtMs,
-          resets7dAtMs:
-            patch.resets7dAtMs !== undefined ? patch.resets7dAtMs : existing.resets7dAtMs,
-          cooldownUntilMs:
-            patch.cooldownUntilMs !== undefined ? patch.cooldownUntilMs : existing.cooldownUntilMs,
-          updatedAtMs: now,
-        })
-        .where(eq(accountQuotas.accountId, accountId))
-        .run();
-    }
+  private listQuotaWindows(accountId: string): QuotaWindow[] {
+    return this.db
+      .select()
+      .from(accountQuotaWindows)
+      .where(eq(accountQuotaWindows.accountId, accountId))
+      .orderBy(accountQuotaWindows.windowId)
+      .all()
+      .map((row) => ({ id: row.windowId, utilization: row.utilization, resetsAtMs: row.resetsAtMs }));
+  }
+
+  public upsertAccountQuota(accountId: string, patch: AccountQuotaPatch): void {
+    const { windows, ...accountFields } = patch;
+    const fields = definedEntries(accountFields);
+    this.sqlite.transaction(() => {
+      const insertAccount = this.db.insert(accountQuotas).values({ accountId, ...fields });
+      if (Object.keys(fields).length > 0) {
+        insertAccount.onConflictDoUpdate({ target: accountQuotas.accountId, set: fields }).run();
+      } else {
+        insertAccount.onConflictDoNothing().run();
+      }
+      for (const window of windows ?? []) {
+        const windowFields = definedEntries({
+          utilization: window.utilization,
+          resetsAtMs: window.resetsAtMs,
+        });
+        const insertWindow = this.db
+          .insert(accountQuotaWindows)
+          .values({ accountId, windowId: window.id, ...windowFields });
+        if (Object.keys(windowFields).length > 0) {
+          insertWindow
+            .onConflictDoUpdate({
+              target: [accountQuotaWindows.accountId, accountQuotaWindows.windowId],
+              set: windowFields,
+            })
+            .run();
+        } else {
+          insertWindow.onConflictDoNothing().run();
+        }
+      }
+    })();
     this.projectBoard();
   }
 
@@ -613,19 +669,24 @@ export class HarnessStore {
     const runs = this.listRuns();
     const blockedRuns = runs.filter((r) => r.status === 'blocked');
 
+    const windowIds = [...new Set(quotas.flatMap((q) => q.windows.map((w) => w.id)))].sort();
+    const quotaColumns = ['Account', ...windowIds, 'Project Share', 'Status'];
     const quotaRows =
       quotas.length === 0
-        ? '| _none_ | — | — | — | — | — | — |\n'
+        ? `| _none_ |${' — |'.repeat(quotaColumns.length - 1)}\n`
         : quotas
             .map((q) => {
-              const u5 = `${Math.round(q.utilization5h * 100)}%`;
-              const u7 = `${Math.round(q.utilization7d * 100)}%`;
+              const windowCells = windowIds.map((id) => {
+                const window = q.windows.find((w) => w.id === id);
+                if (!window) return '—';
+                const countdown = formatCountdown(window.resetsAtMs, nowMs);
+                const usage = `${Math.round(window.utilization * 100)}%`;
+                return countdown === '—' ? usage : `${usage} (${countdown})`;
+              });
               const share = `${Math.round(q.projectShareUsed * 100)}%`;
-              const r5 = formatCountdown(q.resets5hAtMs, nowMs);
-              const r7 = formatCountdown(q.resets7dAtMs, nowMs);
               const status =
                 q.cooldownUntilMs && q.cooldownUntilMs > nowMs ? 'COOLDOWN' : 'READY';
-              return `| \`${q.accountId}\` | ${u5} | ${u7} | ${share} | ${r5} | ${r7} | ${status} |`;
+              return `| ${[`\`${q.accountId}\``, ...windowCells, share, status].join(' | ')} |`;
             })
             .join('\n') + '\n';
 
@@ -653,8 +714,8 @@ export class HarnessStore {
       '# Harness Board',
       '',
       '## Account Pool',
-      '| Account | 5h Usage | 7d Usage | Project Share | 5h Reset | 7d Reset | Status |',
-      '| :--- | :--- | :--- | :--- | :--- | :--- | :--- |',
+      `| ${quotaColumns.join(' | ')} |`,
+      `|${' :--- |'.repeat(quotaColumns.length)}`,
       quotaRows.trimEnd(),
       '',
       '## Workflow Runs',

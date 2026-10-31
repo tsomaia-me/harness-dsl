@@ -1,4 +1,6 @@
-import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
+import { integer, primaryKey, real, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+
+export const SCHEMA_VERSION = 1;
 
 export const workflowRuns = sqliteTable('workflow_runs', {
   id: text('id').primaryKey(),
@@ -44,15 +46,23 @@ export const invocations = sqliteTable('invocations', {
 
 export const accountQuotas = sqliteTable('account_quotas', {
   accountId: text('account_id').primaryKey(),
-  utilization5h: real('utilization_5h').notNull().default(0),
-  utilization7d: real('utilization_7d').notNull().default(0),
   projectShareUsed: real('project_share_used').notNull().default(0),
   windowTokensUsed: integer('window_tokens_used').notNull().default(0),
-  resets5hAtMs: integer('resets_5h_at_ms'),
-  resets7dAtMs: integer('resets_7d_at_ms'),
   cooldownUntilMs: integer('cooldown_until_ms'),
-  updatedAtMs: integer('updated_at_ms').notNull(),
+  probedAtMs: integer('probed_at_ms'),
+  acquiredAtMs: integer('acquired_at_ms'),
 });
+
+export const accountQuotaWindows = sqliteTable(
+  'account_quota_windows',
+  {
+    accountId: text('account_id').notNull(),
+    windowId: text('window_id').notNull(),
+    utilization: real('utilization').notNull().default(0),
+    resetsAtMs: integer('resets_at_ms'),
+  },
+  (table) => [primaryKey({ columns: [table.accountId, table.windowId] })],
+);
 
 export const fileLeases = sqliteTable('file_leases', {
   pattern: text('pattern').primaryKey(),
@@ -112,14 +122,19 @@ CREATE TABLE IF NOT EXISTS invocations (
 
 CREATE TABLE IF NOT EXISTS account_quotas (
   account_id TEXT PRIMARY KEY,
-  utilization_5h REAL NOT NULL DEFAULT 0,
-  utilization_7d REAL NOT NULL DEFAULT 0,
   project_share_used REAL NOT NULL DEFAULT 0,
   window_tokens_used INTEGER NOT NULL DEFAULT 0,
-  resets_5h_at_ms INTEGER,
-  resets_7d_at_ms INTEGER,
   cooldown_until_ms INTEGER,
-  updated_at_ms INTEGER NOT NULL
+  probed_at_ms INTEGER,
+  acquired_at_ms INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS account_quota_windows (
+  account_id TEXT NOT NULL,
+  window_id TEXT NOT NULL,
+  utilization REAL NOT NULL DEFAULT 0,
+  resets_at_ms INTEGER,
+  PRIMARY KEY (account_id, window_id)
 );
 
 CREATE TABLE IF NOT EXISTS file_leases (

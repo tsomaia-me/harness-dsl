@@ -12,12 +12,30 @@ export type HeadCapability =
   | 'telemetry:read'
   | 'runner:exec';
 
-export interface QuotaSnapshot {
-  readonly utilization5h: number;
-  readonly utilization7d: number;
-  readonly resets5hAtMs: number | null;
-  readonly resets7dAtMs: number | null;
-  readonly cooldownUntilMs: number | null;
+export interface QuotaWindow {
+  readonly id: string;
+  readonly utilization: number;
+  readonly resetsAtMs: number | null;
+}
+
+export interface QuotaWindowPatch {
+  readonly id: string;
+  readonly utilization?: number;
+  readonly resetsAtMs?: number | null;
+}
+
+export interface QuotaPatch {
+  readonly windows?: readonly QuotaWindowPatch[];
+  readonly cooldownUntilMs?: number | null;
+}
+
+export interface QuotaPolicy {
+  readonly thresholds: Readonly<Record<string, number>>;
+  readonly defaultThreshold: number;
+  readonly probeStalenessMs: number;
+  readonly tokenBudget: number | null;
+  readonly shareResetWindowId: string | null;
+  readonly defaultCooldownMs: number;
 }
 
 export interface TokenUsage {
@@ -80,7 +98,7 @@ export interface DriverInvokeResult {
     readonly summary: string;
     readonly remainingWork: readonly string[];
   };
-  readonly quotaHint?: Partial<QuotaSnapshot>;
+  readonly quotaHint?: QuotaPatch;
 }
 
 export interface BatchItemRequest {
@@ -114,7 +132,8 @@ export interface BatchAdapter {
 export interface Driver {
   readonly kind: 'claude-cli' | 'ai-sdk' | 'custom' | 'mock';
   invoke(req: DriverInvokeRequest): Promise<DriverInvokeResult>;
-  probeQuota?(accountId: string): Promise<Partial<QuotaSnapshot>>;
+  probeQuota?(accountId: string): Promise<QuotaPatch>;
+  readonly quotaPolicy?: Partial<QuotaPolicy>;
   readonly batch?: BatchAdapter;
 }
 
@@ -122,6 +141,7 @@ export interface ResolvedAccount {
   readonly accountId: string;
   readonly driver: Driver;
   readonly maxQuotaShare: number;
+  readonly quotaPolicy: QuotaPolicy;
 }
 
 export interface AccountProvider {

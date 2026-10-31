@@ -35,6 +35,7 @@ export {
 } from './mcp.js';
 export {
   AccountDef,
+  DEFAULT_QUOTA_POLICY,
   parseRateLimitHeaders,
   PoolDef,
   type PoolReserveConfig,
@@ -52,7 +53,13 @@ export {
   SshRunner,
   type SshRunnerOptions,
 } from './runner.js';
-export { HarnessStore, LessonSchema, type TicketRecord } from './store.js';
+export {
+  type AccountQuotaPatch,
+  type AccountQuotaState,
+  HarnessStore,
+  LessonSchema,
+  type TicketRecord,
+} from './store.js';
 export type {
   AccountProvider,
   AgentPlugin,
@@ -70,7 +77,10 @@ export type {
   FlowMiddleware,
   HeadCapability,
   LessonEntry,
-  QuotaSnapshot,
+  QuotaPatch,
+  QuotaPolicy,
+  QuotaWindow,
+  QuotaWindowPatch,
   ResolvedAccount,
   Runner,
   TokenUsage,

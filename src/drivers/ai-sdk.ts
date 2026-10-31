@@ -177,7 +177,9 @@ export class AiSdkDriver implements Driver {
         >;
         const hint = parseRateLimitHeaders(errHeaders);
         const cooldownUntilMs =
-          hint.cooldownUntilMs ?? hint.resets5hAtMs ?? parseRateLimitResetFromMessage(errMsg);
+          hint.cooldownUntilMs ??
+          hint.windows?.find((w) => w.id === 'anthropic:5h')?.resetsAtMs ??
+          parseRateLimitResetFromMessage(errMsg);
         const wrapped = new Error(`AI SDK rate limit on account ${req.accountId}: ${errMsg}`);
         (wrapped as any).cooldownUntilMs = cooldownUntilMs;
         throw wrapped;

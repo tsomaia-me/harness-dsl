@@ -8,9 +8,16 @@ import type {
   Driver,
   DriverInvokeRequest,
   DriverInvokeResult,
-  QuotaSnapshot,
+  QuotaPatch,
+  QuotaPolicy,
   TokenUsage,
 } from '../types.js';
+
+export const CLAUDE_SUBSCRIPTION_QUOTA_POLICY: Partial<QuotaPolicy> = {
+  thresholds: { 'anthropic:5h': 0.95, 'anthropic:7d': 0.98 },
+  tokenBudget: 5_000_000,
+  shareResetWindowId: 'anthropic:7d',
+};
 
 export interface ClaudeCliSpawnBridge {
   (
@@ -28,7 +35,7 @@ export interface ClaudeCliDriverOptions {
   readonly claudeBinary?: string;
   readonly env?: Record<string, string>;
   readonly spawnBridge?: ClaudeCliSpawnBridge;
-  readonly probeQuota?: (accountId: string) => Promise<Partial<QuotaSnapshot>>;
+  readonly probeQuota?: (accountId: string) => Promise<QuotaPatch>;
 }
 
 export function estimateEquivalentUsd(
@@ -109,7 +116,8 @@ export class ClaudeCliDriver implements Driver {
   public readonly claudeBinary: string;
   private readonly extraEnv: Record<string, string>;
   private readonly spawnBridge?: ClaudeCliSpawnBridge;
-  public readonly probeQuota?: (accountId: string) => Promise<Partial<QuotaSnapshot>>;
+  public readonly probeQuota?: (accountId: string) => Promise<QuotaPatch>;
+  public readonly quotaPolicy = CLAUDE_SUBSCRIPTION_QUOTA_POLICY;
 
   public constructor(opts?: ClaudeCliDriverOptions) {
     this.configDir = opts?.configDir ? expandHome(opts.configDir) : undefined;

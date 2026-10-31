@@ -6,7 +6,7 @@ import type {
   Driver,
   DriverInvokeRequest,
   DriverInvokeResult,
-  QuotaSnapshot,
+  QuotaPatch,
 } from '../types.js';
 
 export type MockInvokeHandler = (
@@ -17,7 +17,7 @@ export type MockInvokeHandler = (
 export interface MockDriverOptions {
   readonly handler?: MockInvokeHandler;
   readonly responses?: readonly (Partial<DriverInvokeResult> & { structuredOutput: unknown })[];
-  readonly probeQuota?: (accountId: string) => Promise<Partial<QuotaSnapshot>>;
+  readonly probeQuota?: (accountId: string) => Promise<QuotaPatch>;
   readonly enableBatch?: boolean;
 }
 
@@ -25,7 +25,7 @@ export class MockDriver implements Driver {
   public readonly kind = 'mock' as const;
   public readonly calls: DriverInvokeRequest[] = [];
   public readonly batchSubmits: BatchItemRequest[][] = [];
-  public readonly probeQuota?: (accountId: string) => Promise<Partial<QuotaSnapshot>>;
+  public readonly probeQuota?: (accountId: string) => Promise<QuotaPatch>;
   public readonly batch?: BatchAdapter;
   private readonly handler?: MockInvokeHandler;
   private readonly responses: readonly (Partial<DriverInvokeResult> & { structuredOutput: unknown })[];

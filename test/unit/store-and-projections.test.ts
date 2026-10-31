@@ -1,7 +1,9 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
+import { DEFAULT_QUOTA_POLICY } from '../../src/quota.js';
 import { HarnessStore } from '../../src/store.js';
 
 describe('HarnessStore & Projections', () => {
@@ -43,6 +45,7 @@ describe('HarnessStore & Projections', () => {
     await expect(waitPromise).resolves.toEqual({ answer: 'round down' });
     expect.soft(store.getRun('run-1')?.status).toBe('running');
 
+    store.registerQuotaPolicy('claude-main', { ...DEFAULT_QUOTA_POLICY, tokenBudget: 5_000_000 });
     store.startInvocation({
       id: 'inv-1',
       runId: 'run-1',
@@ -73,6 +76,46 @@ describe('HarnessStore & Projections', () => {
     expect.soft(telemetryMd).toContain('$0.4200');
     expect.soft(telemetryMd).toContain('## Per-Run Breakdown');
     expect.soft(telemetryMd).toContain('## Per-Agent Scorecard');
+    store.close();
+  });
+
+  it('renders one BOARD.md column per quota window id with usage and reset countdown', () => {
+    const store = makeStore();
+    store.upsertAccountQuota('acct-1', {
+      windows: [{ id: 'acme:weekly', utilization: 0.42, resetsAtMs: Date.now() + 2 * 3600_000 + 30 * 60_000 }],
+    });
+    store.upsertAccountQuota('acct-2', { windows: [{ id: 'acme:rpm', utilization: 0.07 }] });
+
+    const board = readFileSync(store.boardPath, 'utf8');
+    expect.soft(board).toContain('| Account | acme:rpm | acme:weekly | Project Share | Status |');
+    expect.soft(board).toContain('| `acct-1` | — | 42% (2h 30m) | 0% | READY |');
+    expect.soft(board).toContain('| `acct-2` | 7% | — | 0% | READY |');
+    store.close();
+  });
+
+  it('backs up a runtime.db written by an older schema and starts a fresh one', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'harness-store-test-'));
+    tempDirs.push(dir);
+    mkdirSync(path.join(dir, '.harness'));
+    const legacy = new Database(path.join(dir, '.harness', 'runtime.db'));
+    legacy.exec(
+      'CREATE TABLE account_quotas (account_id TEXT PRIMARY KEY, utilization_5h REAL, updated_at_ms INTEGER NOT NULL);',
+    );
+    legacy.prepare('INSERT INTO account_quotas VALUES (?, ?, ?)').run('legacy-acct', 0.5, 1);
+    legacy.close();
+
+    const store = new HarnessStore(dir);
+    store.upsertAccountQuota('acct-new', { windows: [{ id: 'acme:rpm', utilization: 0.3 }] });
+
+    expect.soft(store.getAccountQuota('acct-new')?.windows).toEqual([
+      { id: 'acme:rpm', utilization: 0.3, resetsAtMs: null },
+    ]);
+    expect.soft(store.getAccountQuota('legacy-acct')).toBeNull();
+    const backup = new Database(path.join(dir, '.harness', 'runtime.db.v0.bak'), { readonly: true });
+    expect.soft(backup.prepare('SELECT account_id FROM account_quotas').all()).toEqual([
+      { account_id: 'legacy-acct' },
+    ]);
+    backup.close();
     store.close();
   });
 
