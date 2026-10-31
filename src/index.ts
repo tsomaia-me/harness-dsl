@@ -21,7 +21,16 @@ export {
   drivers,
   MockDriver,
   type MockDriverOptions,
+  type ProviderConnection,
+  type ProviderOptions,
+  type ProviderPreset,
 } from './drivers/index.js';
+export {
+  ANTHROPIC_BATCH_DEFAULTS,
+  type AnthropicBatchOptions,
+  anthropicBatchAdapter,
+} from './batch/anthropic.js';
+export { anthropicPreset, googlePreset, openaiPreset } from './presets/index.js';
 export {
   FlowEngine,
   type FlowRunOptions,

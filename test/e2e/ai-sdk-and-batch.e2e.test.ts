@@ -28,7 +28,7 @@ describe('Live E2E 2: AI SDK Structured Output & Batch Execution', () => {
         H.drivers.aiSdk({
           provider: 'anthropic',
           apiKeyEnv: 'ANTHROPIC_API_KEY',
-          useCloudBatch: false,
+          batch: false,
         }),
       );
       const Haiku = H.model(SdkAcct, 'claude-haiku-4-5-20251001', { cachePrefix: true });
@@ -64,7 +64,6 @@ describe('Live E2E 2: AI SDK Structured Output & Batch Execution', () => {
       const cloudBatchDriver = H.drivers.aiSdk({
         provider: 'anthropic',
         apiKeyEnv: 'ANTHROPIC_API_KEY',
-        useCloudBatch: true,
       });
       const submitted = await cloudBatchDriver.batch!.submit(
         [

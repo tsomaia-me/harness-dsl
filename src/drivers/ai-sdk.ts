@@ -1,15 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { createAnthropic } from '@ai-sdk/anthropic';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { createOpenAI } from '@ai-sdk/openai';
-import { APICallError, generateText, jsonSchema, Output, RetryError } from 'ai';
-import { anthropicPricing, googlePricing, openaiPricing } from '../pricing/index.js';
+import { APICallError, generateText, jsonSchema, type LanguageModel, Output, RetryError } from 'ai';
+import { anthropicPreset } from '../presets/anthropic.js';
+import { googlePreset } from '../presets/google.js';
+import { openaiPreset } from '../presets/openai.js';
 import { RateLimitedError } from '../quota.js';
-import { anthropicRateLimits, ietfRateLimits, openaiRateLimits } from '../rate-limits/index.js';
+import { ietfRateLimits } from '../rate-limits/ietf.js';
 import type {
   BatchAdapter,
-  BatchItemRequest,
-  BatchItemResult,
   Driver,
   DriverInvokeRequest,
   DriverInvokeResult,
@@ -20,32 +17,46 @@ import type {
 
 export type SdkProviderName = 'anthropic' | 'google' | 'openai';
 
-const DEFAULT_RATE_LIMITS: Readonly<Record<SdkProviderName, RateLimitAdapter>> = {
-  anthropic: anthropicRateLimits,
-  google: ietfRateLimits,
-  openai: openaiRateLimits,
+export type ProviderOptions = NonNullable<Parameters<typeof generateText>[0]['providerOptions']>;
+
+export interface ProviderConnection {
+  readonly apiKey?: string;
+  readonly baseURL?: string;
+  readonly fetch?: typeof fetch;
+}
+
+export interface ProviderPreset {
+  readonly name: string;
+  readonly apiKeyEnv?: string;
+  createModel(modelId: string, connection: ProviderConnection): LanguageModel;
+  mapModelOptions?(options: Record<string, unknown>): ProviderOptions | undefined;
+  readonly rateLimits?: RateLimitAdapter;
+  readonly pricing?: PricingAdapter;
+  createBatch?(connection: Omit<ProviderConnection, 'apiKey'> & { readonly apiKey: () => string }): BatchAdapter;
+}
+
+const FIRST_PARTY_PRESETS: Readonly<Record<SdkProviderName, ProviderPreset>> = {
+  anthropic: anthropicPreset,
+  google: googlePreset,
+  openai: openaiPreset,
 };
 
-const DEFAULT_PRICING: Readonly<Record<SdkProviderName, PricingAdapter>> = {
-  anthropic: anthropicPricing,
-  google: googlePricing,
-  openai: openaiPricing,
-};
+const UNPRICED: PricingAdapter = { estimate: () => null };
 
 export interface AiSdkDriverOptions {
-  readonly provider: SdkProviderName;
+  readonly provider: SdkProviderName | ProviderPreset;
   readonly apiKeyEnv?: string;
   readonly apiKey?: string;
   readonly baseURL?: string;
-  readonly useCloudBatch?: boolean;
   readonly customFetch?: typeof fetch;
   readonly rateLimits?: RateLimitAdapter;
   readonly pricing?: PricingAdapter;
+  readonly batch?: BatchAdapter | false;
 }
 
 export class AiSdkDriver implements Driver {
-  public readonly kind = 'ai-sdk' as const;
-  public readonly provider: SdkProviderName;
+  public readonly kind = 'ai-sdk';
+  public readonly preset: ProviderPreset;
   private readonly apiKeyEnv?: string;
   private readonly explicitApiKey?: string;
   private readonly baseURL?: string;
@@ -55,103 +66,45 @@ export class AiSdkDriver implements Driver {
   public readonly batch?: BatchAdapter;
 
   public constructor(opts: AiSdkDriverOptions) {
-    this.provider = opts.provider;
-    this.apiKeyEnv = opts.apiKeyEnv;
+    this.preset = typeof opts.provider === 'string' ? FIRST_PARTY_PRESETS[opts.provider] : opts.provider;
+    this.apiKeyEnv = opts.apiKeyEnv ?? this.preset.apiKeyEnv;
     this.explicitApiKey = opts.apiKey;
     this.baseURL = opts.baseURL;
     this.customFetch = opts.customFetch;
-    this.rateLimits = opts.rateLimits ?? DEFAULT_RATE_LIMITS[opts.provider];
-    this.pricing = opts.pricing ?? DEFAULT_PRICING[opts.provider];
-
-    const enableBatch = opts.useCloudBatch ?? true;
-    if (enableBatch && opts.provider === 'anthropic') {
-      this.batch = this.createAnthropicBatchAdapter();
-    }
+    this.rateLimits = opts.rateLimits ?? this.preset.rateLimits ?? ietfRateLimits;
+    this.pricing = opts.pricing ?? this.preset.pricing ?? UNPRICED;
+    this.batch =
+      opts.batch === false
+        ? undefined
+        : (opts.batch ??
+          this.preset.createBatch?.({
+            apiKey: () => this.requireApiKey(),
+            baseURL: this.baseURL,
+            fetch: this.customFetch,
+          }));
   }
 
-  private resolveApiKey(): string {
-    if (this.explicitApiKey) return this.explicitApiKey;
-    const envName =
-      this.apiKeyEnv ??
-      (this.provider === 'anthropic'
-        ? 'ANTHROPIC_API_KEY'
-        : this.provider === 'google'
-          ? 'GEMINI_API_KEY'
-          : 'OPENAI_API_KEY');
-    const val = process.env[envName];
-    if (!val) {
-      throw new Error(`Missing API key in environment variable ${envName} for ${this.provider}`);
+  private requireApiKey(): string {
+    const apiKey = this.explicitApiKey ?? (this.apiKeyEnv ? process.env[this.apiKeyEnv] : undefined);
+    if (!apiKey) {
+      throw new Error(
+        `Missing API key in environment variable ${this.apiKeyEnv ?? '(none configured)'} for ${this.preset.name}`,
+      );
     }
-    return val;
+    return apiKey;
   }
 
-  private createLanguageModel(modelId: string) {
-    const apiKey = this.resolveApiKey();
-    switch (this.provider) {
-      case 'anthropic': {
-        const anthropic = createAnthropic({
-          apiKey,
-          baseURL: this.baseURL,
-          fetch: this.customFetch,
-        });
-        return anthropic(modelId);
-      }
-      case 'google': {
-        const google = createGoogleGenerativeAI({
-          apiKey,
-          baseURL: this.baseURL,
-          fetch: this.customFetch,
-        });
-        return google(modelId);
-      }
-      case 'openai': {
-        const openai = createOpenAI({
-          apiKey,
-          baseURL: this.baseURL,
-          fetch: this.customFetch,
-        });
-        return openai(modelId);
-      }
-    }
-  }
-
-  private buildProviderOptions(modelOptions: Record<string, unknown>): Record<string, Record<string, any>> | undefined {
-    const { cachePrefix, thinkingBudget, effort, ...rest } = modelOptions;
-    const providerMap: Record<string, any> = { ...rest };
-
-    if (this.provider === 'anthropic') {
-      if (cachePrefix) {
-        providerMap.cacheControl = { type: 'ephemeral' as const };
-      }
-      if (typeof thinkingBudget === 'number' && thinkingBudget > 0) {
-        providerMap.thinking = { type: 'enabled' as const, budgetTokens: thinkingBudget };
-      }
-      if (typeof effort === 'string') {
-        providerMap.effort = effort;
-      }
-      return Object.keys(providerMap).length > 0 ? { anthropic: providerMap } : undefined;
-    }
-
-    if (this.provider === 'openai') {
-      if (typeof effort === 'string') {
-        providerMap.reasoningEffort = effort;
-      }
-      return Object.keys(providerMap).length > 0 ? { openai: providerMap } : undefined;
-    }
-
-    if (this.provider === 'google') {
-      if (typeof thinkingBudget === 'number' && thinkingBudget > 0) {
-        providerMap.thinkingConfig = { thinkingBudget };
-      }
-      return Object.keys(providerMap).length > 0 ? { google: providerMap } : undefined;
-    }
-
-    return undefined;
+  private connection(): ProviderConnection {
+    return {
+      apiKey: this.explicitApiKey || this.apiKeyEnv ? this.requireApiKey() : undefined,
+      baseURL: this.baseURL,
+      fetch: this.customFetch,
+    };
   }
 
   public async invoke(req: DriverInvokeRequest): Promise<DriverInvokeResult> {
-    const model = this.createLanguageModel(req.modelId);
-    const providerOptions = this.buildProviderOptions(req.modelOptions);
+    const model = this.preset.createModel(req.modelId, this.connection());
+    const providerOptions = this.preset.mapModelOptions?.(req.modelOptions);
 
     try {
       const response = await generateText({
@@ -203,137 +156,5 @@ export class AiSdkDriver implements Driver {
       }
       throw err;
     }
-  }
-
-  private createAnthropicBatchAdapter(): BatchAdapter {
-    const fetchFn = this.customFetch ?? globalThis.fetch;
-    const base = (this.baseURL ?? 'https://api.anthropic.com/v1').replace(/\/$/, '');
-
-    return {
-      submit: async (items: readonly BatchItemRequest[], modelId: string) => {
-        const apiKey = this.resolveApiKey();
-        const requests = items.map((item) => ({
-          custom_id: item.customId,
-          params: {
-            model: modelId,
-            max_tokens: 4096,
-            system: [
-              {
-                type: 'text',
-                text: item.systemPrompt,
-                cache_control: { type: 'ephemeral' },
-              },
-            ],
-            messages: [{ role: 'user', content: item.userPrompt }],
-            tools: [
-              {
-                name: 'structured_output',
-                description: 'Return structured output matching the schema',
-                input_schema: item.outputJsonSchema,
-              },
-            ],
-            tool_choice: { type: 'tool', name: 'structured_output' },
-          },
-        }));
-
-        const res = await fetchFn(`${base}/messages/batches`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({ requests }),
-        });
-
-        if (!res.ok) {
-          throw new Error(`Anthropic Batch submit failed (${res.status}): ${await res.text()}`);
-        }
-        const data = (await res.json()) as { id: string };
-        return { batchId: data.id };
-      },
-
-      poll: async (batchId: string) => {
-        const apiKey = this.resolveApiKey();
-        const statusRes = await fetchFn(`${base}/messages/batches/${batchId}`, {
-          headers: {
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-          },
-        });
-        if (!statusRes.ok) {
-          throw new Error(`Anthropic Batch poll failed (${statusRes.status})`);
-        }
-        const statusData = (await statusRes.json()) as {
-          processing_status: string;
-          results_url?: string;
-        };
-
-        if (statusData.processing_status !== 'ended') {
-          return { status: 'running' };
-        }
-        if (!statusData.results_url) {
-          return { status: 'failed' };
-        }
-
-        const resultsRes = await fetchFn(statusData.results_url, {
-          headers: {
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-          },
-        });
-        const text = await resultsRes.text();
-        const results: BatchItemResult[] = text
-          .split('\n')
-          .filter((l) => l.trim().length > 0)
-          .map((line) => {
-            const parsed = JSON.parse(line) as Record<string, any>;
-            const msg = parsed.result?.message;
-            const toolBlock = Array.isArray(msg?.content)
-              ? msg.content.find((b: any) => b.type === 'tool_use')
-              : undefined;
-            const inTok = Number(msg?.usage?.input_tokens ?? 0);
-            const cacheTok = Number(msg?.usage?.cache_read_input_tokens ?? 0);
-            const outTok = Number(msg?.usage?.output_tokens ?? 0);
-            const fullCost =
-              typeof msg?.model === 'string'
-                ? this.pricing.estimate(
-                    msg.model,
-                    { inputTokens: inTok, cachedInputTokens: cacheTok, outputTokens: outTok },
-                    Date.now(),
-                  )
-                : null;
-            return {
-              customId: String(parsed.custom_id),
-              ok: parsed.result?.type === 'succeeded',
-              structuredOutput: toolBlock?.input,
-              error:
-                parsed.result?.type !== 'succeeded'
-                  ? JSON.stringify(parsed.result?.error ?? 'Batch item failed')
-                  : undefined,
-              usage: {
-                inputTokens: inTok,
-                cachedInputTokens: cacheTok,
-                outputTokens: outTok,
-                actualCostUsd: fullCost === null ? null : Number((fullCost * 0.5).toFixed(6)),
-                equivalentCostUsd: fullCost,
-              },
-            };
-          });
-
-        return { status: 'completed', results };
-      },
-
-      cancel: async (batchId: string) => {
-        const apiKey = this.resolveApiKey();
-        await fetchFn(`${base}/messages/batches/${batchId}/cancel`, {
-          method: 'POST',
-          headers: {
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-          },
-        });
-      },
-    };
   }
 }

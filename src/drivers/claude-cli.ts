@@ -63,7 +63,7 @@ const HANDOFF_JSON_SCHEMA = {
 };
 
 export class ClaudeCliDriver implements Driver {
-  public readonly kind = 'claude-cli' as const;
+  public readonly kind = 'claude-cli';
   public readonly configDir?: string;
   public readonly claudeBinary: string;
   private readonly extraEnv: Record<string, string>;

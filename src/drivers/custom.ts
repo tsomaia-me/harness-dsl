@@ -13,7 +13,7 @@ export interface CustomDriverOptions {
 }
 
 export class CustomDriver implements Driver {
-  public readonly kind = 'custom' as const;
+  public readonly kind = 'custom';
   private readonly invokeFn: (req: DriverInvokeRequest) => Promise<DriverInvokeResult>;
   public readonly probeQuota?: (accountId: string) => Promise<QuotaPatch>;
   public readonly batch?: BatchAdapter;

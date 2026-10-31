@@ -22,7 +22,7 @@ export interface MockDriverOptions {
 }
 
 export class MockDriver implements Driver {
-  public readonly kind = 'mock' as const;
+  public readonly kind = 'mock';
   public readonly calls: DriverInvokeRequest[] = [];
   public readonly batchSubmits: BatchItemRequest[][] = [];
   public readonly probeQuota?: (accountId: string) => Promise<QuotaPatch>;

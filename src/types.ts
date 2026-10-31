@@ -142,7 +142,7 @@ export interface BatchAdapter {
 }
 
 export interface Driver {
-  readonly kind: 'claude-cli' | 'ai-sdk' | 'custom' | 'mock';
+  readonly kind: string;
   invoke(req: DriverInvokeRequest): Promise<DriverInvokeResult>;
   probeQuota?(accountId: string): Promise<QuotaPatch>;
   readonly quotaPolicy?: Partial<QuotaPolicy>;
