@@ -8,6 +8,7 @@ import type {
   ExecutionContext,
   FlowContext,
   HookReceiver,
+  TokenUsage,
 } from './types.js';
 
 export interface FlowRunOptions {
@@ -436,6 +437,7 @@ export class FlowEngine {
           requests,
           executable.agent.modelDef.modelId,
           executable.agent.modelDef.options,
+          executable.agent.modelDef.pricingAdapter,
         );
 
         const pollInterval = opts?.batchPollIntervalMs ?? 20;
@@ -458,47 +460,51 @@ export class FlowEngine {
             throw new Error(`Cloud batch ${batchId} failed`);
           }
           if (polled.status === 'completed' && polled.results) {
-            let totalIn = 0;
-            let totalCache = 0;
-            let totalOut = 0;
-            const actualCosts: (number | null)[] = [];
-            const equivalentCosts: (number | null)[] = [];
-            const byId = new Map(polled.results.map((r) => [r.customId, r]));
+            const results = polled.results;
+            const finish = (status: 'pass' | 'fail', extra: { output?: unknown; errorText?: string }) => {
+              const sum = (pick: (usage: TokenUsage) => number) =>
+                results.reduce((total, r) => total + pick(r.usage), 0);
+              const inputTokens = sum((u) => u.inputTokens);
+              const outputTokens = sum((u) => u.outputTokens);
+              const actualCosts = results.map((r) => r.usage.actualCostUsd);
+              const equivalentCosts = results.map((r) => r.usage.equivalentCostUsd);
+              this.store.recordAccountTokenUsage(
+                resolved.accountId,
+                inputTokens + outputTokens,
+                resolved.quotaPolicy.tokenBudget,
+              );
+              this.store.finishInvocation(invId, {
+                status,
+                inputTokens,
+                cachedInputTokens: sum((u) => u.cachedInputTokens),
+                cacheWriteTokens: sum((u) => u.cacheWriteTokens ?? 0),
+                outputTokens,
+                actualCostUsd: actualCosts.includes(null) ? null : sumCosts(actualCosts).usd,
+                equivalentCostUsd: equivalentCosts.includes(null) ? null : sumCosts(equivalentCosts).usd,
+                ...extra,
+              });
+            };
+            const byId = new Map(results.map((r) => [r.customId, r]));
             const outputs: TOut[] = [];
 
-            for (let idx = 0; idx < items.length; idx += 1) {
-              const resItem = byId.get(`${stepName}-${idx}`);
-              if (!resItem || !resItem.ok) {
-                throw new Error(
-                  `Batch item ${stepName}-${idx} failed: ${resItem?.error ?? 'missing'}`,
-                );
+            try {
+              for (let idx = 0; idx < items.length; idx += 1) {
+                const resItem = byId.get(`${stepName}-${idx}`);
+                if (!resItem || !resItem.ok) {
+                  throw new Error(`Batch item ${stepName}-${idx} failed: ${resItem?.error ?? 'missing'}`);
+                }
+                const parsedOut = executable.skill.outputSchema.parse(resItem.structuredOutput);
+                if (executable.skill.assertFn) {
+                  await executable.skill.assertFn(parsedOut, parsedInputs[idx]!);
+                }
+                outputs.push(parsedOut);
               }
-              totalIn += resItem.usage.inputTokens;
-              totalCache += resItem.usage.cachedInputTokens;
-              totalOut += resItem.usage.outputTokens;
-              actualCosts.push(resItem.usage.actualCostUsd);
-              equivalentCosts.push(resItem.usage.equivalentCostUsd);
-              const parsedOut = executable.skill.outputSchema.parse(resItem.structuredOutput);
-              if (executable.skill.assertFn) {
-                await executable.skill.assertFn(parsedOut, parsedInputs[idx]!);
-              }
-              outputs.push(parsedOut);
+            } catch (err) {
+              finish('fail', { errorText: err instanceof Error ? err.message : String(err) });
+              throw err;
             }
 
-            this.store.recordAccountTokenUsage(
-              resolved.accountId,
-              totalIn + totalOut,
-              resolved.quotaPolicy.tokenBudget,
-            );
-            this.store.finishInvocation(invId, {
-              status: 'pass',
-              inputTokens: totalIn,
-              cachedInputTokens: totalCache,
-              outputTokens: totalOut,
-              actualCostUsd: actualCosts.includes(null) ? null : sumCosts(actualCosts).usd,
-              equivalentCostUsd: equivalentCosts.includes(null) ? null : sumCosts(equivalentCosts).usd,
-              output: outputs,
-            });
+            finish('pass', { output: outputs });
             return outputs;
           }
           await new Promise((r) => setTimeout(r, pollInterval));

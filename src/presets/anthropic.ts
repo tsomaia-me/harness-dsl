@@ -26,6 +26,6 @@ export const anthropicPreset: ProviderPreset = {
       apiKey: connection.apiKey,
       baseURL: connection.baseURL,
       fetch: connection.fetch,
-      pricing: anthropicPricing,
+      pricing: connection.pricing,
     }),
 };

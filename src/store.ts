@@ -61,6 +61,7 @@ export interface FinishInvocationInput {
   readonly sessionId?: string;
   readonly inputTokens?: number;
   readonly cachedInputTokens?: number;
+  readonly cacheWriteTokens?: number;
   readonly outputTokens?: number;
   readonly actualCostUsd?: number | null;
   readonly equivalentCostUsd?: number | null;
@@ -361,6 +362,7 @@ export class HarnessStore {
         durationMs,
         inputTokens: inTokens,
         cachedInputTokens: cacheTokens,
+        cacheWriteTokens: input.cacheWriteTokens ?? 0,
         outputTokens: outTokens,
         actualCostUsd: input.actualCostUsd === undefined ? 0 : input.actualCostUsd,
         equivalentCostUsd: input.equivalentCostUsd === undefined ? 0 : input.equivalentCostUsd,

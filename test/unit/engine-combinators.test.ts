@@ -286,6 +286,33 @@ describe('FlowEngine Combinators & Userland Arbitration Composition', () => {
     store.close();
   });
 
+  it('finishes a cloud batch invocation as failed, with the tokens already paid, when one item errored', async () => {
+    const { store, engine } = makeEngine();
+    const paid = { inputTokens: 500, cachedInputTokens: 0, outputTokens: 100, actualCostUsd: 0.01, equivalentCostUsd: 0.02 };
+    const driver = H.drivers.custom({
+      invoke: async () => ({ structuredOutput: { ok: true }, rawText: '', sessionId: 's', usage: paid }),
+      batch: {
+        submit: async () => ({ batchId: 'b1' }),
+        poll: async () => ({
+          status: 'completed',
+          results: [
+            { customId: 'audit-0', ok: true, structuredOutput: { ok: true }, usage: paid },
+            { customId: 'audit-1', ok: false, error: 'overloaded', usage: { ...paid, inputTokens: 0, outputTokens: 0, actualCostUsd: 0, equivalentCostUsd: 0 } },
+          ],
+        }),
+      },
+    });
+    const agent = H.agent('auditor').model(H.model(H.account('a', driver), 'model-x'));
+    const skill = H.skill('audit').input(z.object({})).output(z.object({ ok: z.boolean() }));
+    const flow = H.flow('f').input(z.object({})).batch('audit', { items: () => [{}, {}], execute: agent.run(skill) });
+
+    await expect(engine.run(flow, {}, { batchPollIntervalMs: 1 })).rejects.toThrow(/audit-1 failed: overloaded/);
+    const batchInvocation = store.listInvocations().find((inv) => inv.actorKind === 'batch');
+    expect.soft(batchInvocation?.status).toBe('fail');
+    expect(batchInvocation?.inputTokens).toBe(500);
+    store.close();
+  });
+
   it('executes .branch() and .batch() via Cloud Batch API when items.length > 1 and runs skill .assert()', async () => {
     const { store, engine } = makeEngine();
 

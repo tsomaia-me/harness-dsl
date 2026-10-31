@@ -59,9 +59,10 @@ export function anthropicBatchAdapter(opts: AnthropicBatchOptions): BatchAdapter
   const discount = opts.discount ?? ANTHROPIC_BATCH_DEFAULTS.discount;
   const structuredOutput = opts.structuredOutput ?? ANTHROPIC_BATCH_DEFAULTS.structuredOutput;
   const headers = () => ({ 'x-api-key': opts.apiKey(), 'anthropic-version': apiVersion });
+  const pricingByBatch = new Map<string, PricingAdapter>();
 
   return {
-    submit: async (items, modelId, modelOptions) => {
+    submit: async (items, modelId, modelOptions, pricing) => {
       const requests = items.map((item) => {
         const config = outputConfig(item.outputJsonSchema, modelOptions, structuredOutput);
         return {
@@ -97,6 +98,7 @@ export function anthropicBatchAdapter(opts: AnthropicBatchOptions): BatchAdapter
         throw new Error(`Anthropic Batch submit failed (${res.status}): ${await res.text()}`);
       }
       const data = (await res.json()) as { id: string };
+      if (pricing) pricingByBatch.set(data.id, pricing);
       return { batchId: data.id };
     },
 
@@ -116,6 +118,8 @@ export function anthropicBatchAdapter(opts: AnthropicBatchOptions): BatchAdapter
         return { status: 'failed' };
       }
 
+      const pricing = pricingByBatch.get(batchId) ?? opts.pricing;
+      pricingByBatch.delete(batchId);
       const resultsRes = await fetchFn(statusData.results_url, { headers: headers() });
       const results: BatchItemResult[] = (await resultsRes.text())
         .split('\n')
@@ -123,13 +127,16 @@ export function anthropicBatchAdapter(opts: AnthropicBatchOptions): BatchAdapter
         .map((line) => {
           const parsed = JSON.parse(line) as Record<string, any>;
           const msg = parsed.result?.message;
+          const cachedInputTokens = Number(msg?.usage?.cache_read_input_tokens ?? 0);
+          const cacheWriteTokens = Number(msg?.usage?.cache_creation_input_tokens ?? 0);
           const counts = {
-            inputTokens: Number(msg?.usage?.input_tokens ?? 0),
-            cachedInputTokens: Number(msg?.usage?.cache_read_input_tokens ?? 0),
+            inputTokens: Number(msg?.usage?.input_tokens ?? 0) + cachedInputTokens + cacheWriteTokens,
+            cachedInputTokens,
+            cacheWriteTokens,
             outputTokens: Number(msg?.usage?.output_tokens ?? 0),
           };
           const fullCost =
-            typeof msg?.model === 'string' ? opts.pricing.estimate(msg.model, counts, Date.now()) : null;
+            typeof msg?.model === 'string' ? pricing.estimate(msg.model, counts, Date.now()) : null;
           const succeeded = parsed.result?.type === 'succeeded';
           return {
             customId: String(parsed.custom_id),

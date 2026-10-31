@@ -3,6 +3,7 @@ import { MockLanguageModelV3 } from 'ai/test';
 import { describe, expect, it } from 'vitest';
 import { anthropicBatchAdapter } from '../../src/batch/anthropic.js';
 import { H } from '../../src/dsl.js';
+import { anthropicPricing } from '../../src/pricing/index.js';
 import { anthropicPreset, googlePreset, openaiPreset } from '../../src/presets/index.js';
 import type { DriverInvokeRequest, PricingAdapter } from '../../src/types.js';
 
@@ -42,7 +43,7 @@ describe('Provider presets', () => {
               content: [{ type: 'text', text: '{"severity":"low"}' }],
               finishReason: { unified: 'stop', raw: 'stop' },
               usage: {
-                inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+                inputTokens: { total: 100, noCache: 50, cacheRead: 30, cacheWrite: 20 },
                 outputTokens: { total: 20, text: 20, reasoning: 0 },
               },
               warnings: [],
@@ -56,6 +57,7 @@ describe('Provider presets', () => {
     expect.soft(seenModelIds).toEqual(['anthropic.claude-opus-5-5']);
     expect.soft(result.structuredOutput).toEqual({ severity: 'low' });
     expect.soft(result.usage.equivalentCostUsd).toBeNull();
+    expect.soft(result.usage).toMatchObject({ inputTokens: 100, cachedInputTokens: 30, cacheWriteTokens: 20, outputTokens: 20 });
     expect.soft(driver.batch).toBeUndefined();
   });
 
@@ -145,6 +147,37 @@ describe('Anthropic batch adapter', () => {
     expect.soft(polled.results?.[0]?.structuredOutput).toEqual({ severity: 'low' });
     expect.soft(polled.results?.[0]?.usage.equivalentCostUsd).toBe(0.1);
     expect.soft(polled.results?.[0]?.usage.actualCostUsd).toBe(0.025);
+  });
+
+  it('counts cache reads and writes as input and prices each at its own rate', async () => {
+    const { fetchFn } = recordingFetch({
+      model: 'claude-sonnet-4-5',
+      usage: { input_tokens: 1_000, cache_read_input_tokens: 9_000, cache_creation_input_tokens: 2_000, output_tokens: 0 },
+      content: [{ type: 'text', text: '{"severity":"low"}' }],
+    });
+    const batch = anthropicBatchAdapter({ apiKey: () => 'k', pricing: anthropicPricing, fetch: fetchFn });
+    const usage = (await batch.poll('msgbatch_01')).results?.[0]?.usage;
+    expect.soft(usage).toMatchObject({ inputTokens: 12_000, cachedInputTokens: 9_000, cacheWriteTokens: 2_000 });
+    expect(usage?.equivalentCostUsd).toBeCloseTo((1_000 * 3 + 9_000 * 0.3 + 2_000 * 3.75) / 1e6, 9);
+  });
+
+  it.each([
+    { label: 'the driver pricing option', driverPricing: { estimate: () => 0.1 }, submitPricing: undefined, expected: 0.1 },
+    { label: 'the pricing passed with the batch', driverPricing: undefined, submitPricing: { estimate: () => 0.3 }, expected: 0.3 },
+  ])('prices AI SDK batch results with $label', async ({ driverPricing, submitPricing, expected }) => {
+    const { fetchFn } = recordingFetch({
+      model: 'claude-opus-5-5',
+      usage: { input_tokens: 1_000, cache_read_input_tokens: 0, output_tokens: 200 },
+      content: [{ type: 'text', text: '{"severity":"low"}' }],
+    });
+    const driver = H.drivers.aiSdk({ provider: 'anthropic', apiKey: 'k', customFetch: fetchFn, pricing: driverPricing });
+    const { batchId } = await driver.batch!.submit(
+      [{ customId: 'item-0', systemPrompt: 'Audit', userPrompt: 'x', outputJsonSchema: SCHEMA }],
+      'claude-opus-5-5',
+      {},
+      submitPricing,
+    );
+    expect((await driver.batch!.poll(batchId)).results?.[0]?.usage.equivalentCostUsd).toBe(expected);
   });
 
   it('is the anthropic driver default and can be turned off', () => {

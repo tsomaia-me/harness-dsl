@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { H } from '../../src/dsl.js';
-import { anthropicPricing, googlePricing, openaiPricing } from '../../src/pricing/index.js';
+import { anthropicPricing, googlePricing, openaiPricing, priceListPricing } from '../../src/pricing/index.js';
 import { HarnessStore } from '../../src/store.js';
 import type { ExecutionContext, PricingAdapter } from '../../src/types.js';
 
@@ -34,6 +34,25 @@ describe('Pricing adapters', () => {
     } else {
       expect(estimate).toBeCloseTo(expected, 9);
     }
+  });
+
+  it('prices cache writes at the cache-write rate and cache reads at the cached rate', () => {
+    expect(
+      anthropicPricing.estimate(
+        'claude-opus-5-5',
+        { inputTokens: M, cachedInputTokens: M / 4, cacheWriteTokens: M / 4, outputTokens: 0 },
+        MID_NOVEMBER_2026,
+      ),
+    ).toBeCloseTo(0.5 * 4 + 0.25 * 0.2 + 0.25 * 5, 9);
+  });
+
+  it('matches a user price list entry whose model id has capitals', () => {
+    const pricing = priceListPricing({
+      source: 'internal',
+      asOf: '2026-10-31',
+      prices: [{ model: 'Acme-Large', inputPerMTok: 1, outputPerMTok: 1 }],
+    });
+    expect(pricing.estimate('Acme-Large', { inputTokens: M, cachedInputTokens: 0, outputTokens: 0 }, MID_NOVEMBER_2026)).toBe(1);
   });
 
   it('applies a scheduled price change from its effective date', () => {
@@ -92,6 +111,17 @@ describe('Cost reporting through drivers', () => {
     const agent = H.agent('a').model(H.model(H.account('cli', cliReturning({ total_cost_usd: 0.0028309 })), 'claude-opus-5-5'));
     await agent.run(skill).execute({}, ctx);
     expect(store.listInvocations('run-cost')[0]?.equivalentCostUsd).toBe(0.0028309);
+    store.close();
+  });
+
+  it('prefers the model pricing override to the cost the claude CLI reports', async () => {
+    const { store, ctx } = makeContext();
+    const flat: PricingAdapter = { estimate: () => 7 };
+    const agent = H.agent('a').model(
+      H.model(H.account('cli', cliReturning({ total_cost_usd: 0.0028309 })), 'claude-opus-5-5').pricing(flat),
+    );
+    await agent.run(skill).execute({}, ctx);
+    expect(store.listInvocations('run-cost')[0]?.equivalentCostUsd).toBe(7);
     store.close();
   });
 

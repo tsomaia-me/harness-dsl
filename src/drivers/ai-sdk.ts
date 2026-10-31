@@ -32,7 +32,12 @@ export interface ProviderPreset {
   mapModelOptions?(options: Record<string, unknown>): ProviderOptions | undefined;
   readonly rateLimits?: RateLimitAdapter;
   readonly pricing?: PricingAdapter;
-  createBatch?(connection: Omit<ProviderConnection, 'apiKey'> & { readonly apiKey: () => string }): BatchAdapter;
+  createBatch?(
+    connection: Omit<ProviderConnection, 'apiKey'> & {
+      readonly apiKey: () => string;
+      readonly pricing: PricingAdapter;
+    },
+  ): BatchAdapter;
 }
 
 const FIRST_PARTY_PRESETS: Readonly<Record<SdkProviderName, ProviderPreset>> = {
@@ -81,6 +86,7 @@ export class AiSdkDriver implements Driver {
             apiKey: () => this.requireApiKey(),
             baseURL: this.baseURL,
             fetch: this.customFetch,
+            pricing: this.pricing,
           }));
   }
 
@@ -120,10 +126,11 @@ export class AiSdkDriver implements Driver {
 
       const inputTokens = response.usage?.inputTokens ?? 0;
       const outputTokens = response.usage?.outputTokens ?? 0;
-      const cachedInputTokens = (response.usage as any)?.cachedInputTokens ?? 0;
+      const cachedInputTokens = response.usage?.inputTokenDetails?.cacheReadTokens ?? 0;
+      const cacheWriteTokens = response.usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
       const cost = (req.pricing ?? this.pricing).estimate(
         req.modelId,
-        { inputTokens, cachedInputTokens, outputTokens },
+        { inputTokens, cachedInputTokens, cacheWriteTokens, outputTokens },
         Date.now(),
       );
 
@@ -133,6 +140,7 @@ export class AiSdkDriver implements Driver {
       const usage: TokenUsage = {
         inputTokens,
         cachedInputTokens,
+        cacheWriteTokens,
         outputTokens,
         actualCostUsd: cost,
         equivalentCostUsd: cost,

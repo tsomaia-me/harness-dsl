@@ -187,6 +187,7 @@ export class ClaudeCliDriver implements Driver {
 
     let inputTokens = 0;
     let cachedInputTokens = 0;
+    let cacheWriteTokens = 0;
     let outputTokens = 0;
     let structuredOutput: unknown = undefined;
     let rawText = '';
@@ -210,6 +211,7 @@ export class ClaudeCliDriver implements Driver {
           const outTok = Number(usage.output_tokens ?? 0);
           inputTokens = Math.max(inputTokens, inTok + cacheCreate + cacheRead);
           cachedInputTokens = Math.max(cachedInputTokens, cacheRead);
+          cacheWriteTokens = Math.max(cacheWriteTokens, cacheCreate);
           outputTokens = Math.max(outputTokens, outTok);
 
           const totalContext = inTok + cacheCreate + cacheRead + outTok;
@@ -354,18 +356,13 @@ export class ClaudeCliDriver implements Driver {
         };
       }
 
+      const counts = { inputTokens, cachedInputTokens, cacheWriteTokens, outputTokens };
       const usage: TokenUsage = {
-        inputTokens,
-        cachedInputTokens,
-        outputTokens,
+        ...counts,
         actualCostUsd: 0,
-        equivalentCostUsd:
-          reportedCostUsd ??
-          (req.pricing ?? anthropicPricing).estimate(
-            req.modelId,
-            { inputTokens, cachedInputTokens, outputTokens },
-            Date.now(),
-          ),
+        equivalentCostUsd: req.pricing
+          ? req.pricing.estimate(req.modelId, counts, Date.now())
+          : (reportedCostUsd ?? anthropicPricing.estimate(req.modelId, counts, Date.now())),
       };
 
       return {

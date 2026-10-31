@@ -3,6 +3,7 @@ import type { PricingAdapter, TokenCounts } from '../types.js';
 export interface TokenRates {
   readonly inputPerMTok: number;
   readonly cachedInputPerMTok?: number;
+  readonly cacheWritePerMTok?: number;
   readonly outputPerMTok: number;
 }
 
@@ -32,11 +33,12 @@ function matchesModel(modelId: string, model: string): boolean {
 }
 
 function costUsd(rates: TokenRates, usage: TokenCounts): number {
-  const cachedRate = rates.cachedInputPerMTok ?? rates.inputPerMTok;
-  const uncachedInput = Math.max(0, usage.inputTokens - usage.cachedInputTokens);
+  const cacheWriteTokens = usage.cacheWriteTokens ?? 0;
+  const uncachedInput = Math.max(0, usage.inputTokens - usage.cachedInputTokens - cacheWriteTokens);
   const total =
     uncachedInput * rates.inputPerMTok +
-    usage.cachedInputTokens * cachedRate +
+    usage.cachedInputTokens * (rates.cachedInputPerMTok ?? rates.inputPerMTok) +
+    cacheWriteTokens * (rates.cacheWritePerMTok ?? rates.inputPerMTok) +
     usage.outputTokens * rates.outputPerMTok;
   return Number((total / 1_000_000).toFixed(6));
 }
@@ -47,7 +49,7 @@ export function priceListPricing(list: PriceList): PricingAdapter {
       const normalizedId = modelId.toLowerCase();
       const inEffect = list.prices.filter(
         (price) =>
-          matchesModel(normalizedId, price.model) &&
+          matchesModel(normalizedId, price.model.toLowerCase()) &&
           (price.effectiveFrom === undefined || Date.parse(price.effectiveFrom) <= atMs),
       );
       const best = inEffect.sort(

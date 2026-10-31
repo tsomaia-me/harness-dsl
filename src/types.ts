@@ -45,6 +45,7 @@ export interface QuotaPolicy {
 export interface TokenCounts {
   readonly inputTokens: number;
   readonly cachedInputTokens: number;
+  readonly cacheWriteTokens?: number;
   readonly outputTokens: number;
 }
 
@@ -133,6 +134,7 @@ export interface BatchAdapter {
     items: readonly BatchItemRequest[],
     modelId: string,
     opts: Record<string, unknown>,
+    pricing?: PricingAdapter,
   ): Promise<{ batchId: string }>;
   poll(batchId: string): Promise<{
     status: 'running' | 'completed' | 'failed';
