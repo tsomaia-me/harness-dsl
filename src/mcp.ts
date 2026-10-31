@@ -354,7 +354,6 @@ export class HarnessMcpServer {
             id: z.string(),
             title: z.string().optional(),
             status: z.string().optional(),
-            touches: z.array(z.string()).optional(),
             body: z.string().optional(),
             frontmatter: z.record(z.string(), z.unknown()).optional(),
           },
@@ -363,7 +362,6 @@ export class HarnessMcpServer {
           const fm: Record<string, unknown> = { ...(args.frontmatter ?? {}) };
           if (args.title !== undefined) fm.title = args.title;
           if (args.status !== undefined) fm.status = args.status;
-          if (args.touches !== undefined) fm.touches = args.touches;
           const ticket = this.store.writeTicket(args.id, fm, args.body ?? "");
           return this.formatMcpResult({ ticket });
         },
@@ -561,8 +559,6 @@ export class HarnessMcpServer {
             stepName: toolName,
             projectDir: this.store.projectDir,
             workDir: this.store.projectDir,
-            slotIndex: 0,
-            slotPorts: [18000, 18001, 18002],
             touchedPaths: [],
             store: this.store,
             hookServerUrl: this.url,

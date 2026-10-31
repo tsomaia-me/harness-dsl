@@ -1,56 +1,55 @@
-import type { AgentPlugin, Executable } from '../types.js';
+import type { AgentPlugin, Executable, HookDecision } from '../types.js';
 
-export function stopCommandHook<TInput = any, TOutput = any>(
+export interface StopCheckOutput {
+  readonly passed: boolean;
+  readonly summary?: string;
+}
+
+export interface StopCommandHookOptions<TInput, TOutput> {
+  readonly mapInput?: (ctx: { runId: string; workDir: string }) => TInput;
+  readonly verdict?: (output: TOutput) => HookDecision;
+}
+
+function passedVerdict(output: StopCheckOutput): HookDecision {
+  return { allow: output.passed === true, reason: output.summary };
+}
+
+export function stopCommandHook<TInput, TOutput extends StopCheckOutput>(
   command: Executable<TInput, TOutput>,
-  mapInput?: (ctx: { runId: string; workDir: string }) => TInput,
+  opts?: StopCommandHookOptions<TInput, TOutput>,
+): AgentPlugin;
+export function stopCommandHook<TInput, TOutput>(
+  command: Executable<TInput, TOutput>,
+  opts: StopCommandHookOptions<TInput, TOutput> & { readonly verdict: (output: TOutput) => HookDecision },
+): AgentPlugin;
+export function stopCommandHook<TInput, TOutput>(
+  command: Executable<TInput, TOutput>,
+  opts?: StopCommandHookOptions<TInput, TOutput>,
 ): AgentPlugin {
+  const verdict = opts?.verdict ?? (passedVerdict as unknown as (output: TOutput) => HookDecision);
   return {
     name: `stopCommandHook:${command.name}`,
     stop: {
       async handle(_event, ctx) {
-        const input = mapInput
-          ? mapInput({ runId: ctx.runId, workDir: ctx.workDir })
+        const input = opts?.mapInput
+          ? opts.mapInput({ runId: ctx.runId, workDir: ctx.workDir })
           : ({ worktreePath: ctx.workDir, workDir: ctx.workDir } as unknown as TInput);
 
-        const res = (await command.execute(input, {
+        const output = await command.execute(input, {
           runId: ctx.runId,
           iteration: 0,
           stepName: `stop-hook:${command.name}`,
           projectDir: ctx.store.projectDir,
           workDir: ctx.workDir,
-          slotIndex: 0,
-          slotPorts: [18000, 18001, 18002],
           touchedPaths: [],
           store: ctx.store,
           signal: new AbortController().signal,
-        })) as Record<string, unknown>;
+        });
 
-        const passed =
-          typeof res === 'object' && res !== null
-            ? res.passed !== undefined
-              ? Boolean(res.passed)
-              : res.exitCode !== undefined
-                ? res.exitCode === 0
-                : true
-            : Boolean(res);
-
-        if (!passed) {
-          const reason =
-            (typeof res === 'object' &&
-              res !== null &&
-              (typeof res.summary === 'string'
-                ? res.summary
-                : typeof res.stderr === 'string'
-                  ? res.stderr
-                  : JSON.stringify(res))) ||
-            `Stop check "${command.name}" failed`;
-          return {
-            allow: false,
-            reason,
-          };
-        }
-
-        return { allow: true };
+        const decision = verdict(output);
+        return decision.allow
+          ? { allow: true }
+          : { allow: false, reason: decision.reason ?? `Stop check "${command.name}" failed` };
       },
     },
   };

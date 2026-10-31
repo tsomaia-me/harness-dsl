@@ -797,6 +797,11 @@ export type BranchStepsResult<
   >
 >;
 
+export interface FlowIdentifiers<TInput> {
+  readonly ticketId?: (input: TInput) => string | undefined;
+  readonly touchedPaths?: (input: TInput) => readonly string[];
+}
+
 export class FlowDef<
   TInput = unknown,
   TSteps extends Record<string, any> = {},
@@ -808,6 +813,7 @@ export class FlowDef<
   public readonly outputSchema: z.ZodType<TSteps>;
   public readonly nodes: readonly FlowNode[];
   public readonly middlewares: readonly FlowMiddleware[];
+  public readonly identifiers: FlowIdentifiers<TInput>;
   public readonly errorHandler?: (
     error: unknown,
     ctx: FlowContext<TInput, TSteps>,
@@ -822,6 +828,7 @@ export class FlowDef<
       inputSchema?: z.ZodType<TInput>;
       nodes?: readonly FlowNode[];
       middlewares?: readonly FlowMiddleware[];
+      identifiers?: FlowIdentifiers<TInput>;
       errorHandler?: (error: unknown, ctx: FlowContext<TInput, TSteps>) => Promise<void> | void;
       finallyHandler?:
         | Executable<any, any>
@@ -833,8 +840,20 @@ export class FlowDef<
     this.outputSchema = z.any() as z.ZodType<TSteps>;
     this.nodes = opts?.nodes ?? [];
     this.middlewares = opts?.middlewares ?? [];
+    this.identifiers = opts?.identifiers ?? {};
     this.errorHandler = opts?.errorHandler;
     this.finallyHandler = opts?.finallyHandler;
+  }
+
+  public identify(identifiers: FlowIdentifiers<TInput>): FlowDef<TInput, TSteps> {
+    return new FlowDef<TInput, TSteps>(this.name, {
+      inputSchema: this.inputSchema,
+      nodes: this.nodes,
+      middlewares: this.middlewares,
+      identifiers,
+      errorHandler: this.errorHandler,
+      finallyHandler: this.finallyHandler,
+    });
   }
 
   public input<TNewInput>(schema: z.ZodType<TNewInput>): FlowDef<TNewInput, TSteps> {
@@ -844,6 +863,7 @@ export class FlowDef<
       middlewares: this.middlewares,
       errorHandler: this.errorHandler as any,
       finallyHandler: this.finallyHandler as any,
+      identifiers: this.identifiers as FlowIdentifiers<any>,
     });
   }
 
@@ -854,6 +874,7 @@ export class FlowDef<
       middlewares: [...this.middlewares, middleware],
       errorHandler: this.errorHandler,
       finallyHandler: this.finallyHandler,
+      identifiers: this.identifiers,
     });
   }
 
@@ -879,6 +900,7 @@ export class FlowDef<
       middlewares: this.middlewares,
       errorHandler: this.errorHandler as any,
       finallyHandler: this.finallyHandler as any,
+      identifiers: this.identifiers,
     });
   }
 
@@ -913,6 +935,7 @@ export class FlowDef<
         middlewares: this.middlewares,
         errorHandler: this.errorHandler as any,
         finallyHandler: this.finallyHandler as any,
+        identifiers: this.identifiers,
       });
     }
 
@@ -932,6 +955,7 @@ export class FlowDef<
       middlewares: this.middlewares,
       errorHandler: this.errorHandler as any,
       finallyHandler: this.finallyHandler as any,
+      identifiers: this.identifiers,
     });
   }
 
@@ -967,6 +991,7 @@ export class FlowDef<
       middlewares: this.middlewares,
       errorHandler: this.errorHandler as any,
       finallyHandler: this.finallyHandler as any,
+      identifiers: this.identifiers,
     });
   }
 
@@ -1001,6 +1026,7 @@ export class FlowDef<
       middlewares: this.middlewares,
       errorHandler: this.errorHandler as any,
       finallyHandler: this.finallyHandler as any,
+      identifiers: this.identifiers,
     });
   }
 
@@ -1024,6 +1050,7 @@ export class FlowDef<
       middlewares: this.middlewares,
       errorHandler: this.errorHandler as any,
       finallyHandler: this.finallyHandler as any,
+      identifiers: this.identifiers,
     });
   }
 
@@ -1050,6 +1077,7 @@ export class FlowDef<
       middlewares: this.middlewares,
       errorHandler: this.errorHandler as any,
       finallyHandler: this.finallyHandler as any,
+      identifiers: this.identifiers,
     });
   }
 
@@ -1068,6 +1096,7 @@ export class FlowDef<
       middlewares: this.middlewares,
       errorHandler: this.errorHandler,
       finallyHandler: this.finallyHandler,
+      identifiers: this.identifiers,
     });
   }
 
@@ -1080,6 +1109,7 @@ export class FlowDef<
       middlewares: this.middlewares,
       errorHandler: handler,
       finallyHandler: this.finallyHandler,
+      identifiers: this.identifiers,
     });
   }
 
@@ -1092,6 +1122,7 @@ export class FlowDef<
       middlewares: this.middlewares,
       errorHandler: this.errorHandler,
       finallyHandler: handler,
+      identifiers: this.identifiers,
     });
   }
 

@@ -42,25 +42,20 @@ describe('LocalRunner & SshRunner Process Containment', () => {
     const runner = new LocalRunner({
       maxConcurrentSlots: 2,
       slotPortBase: 19000,
+      portsPerSlot: 3,
+      slotEnv: (_slotIndex, ports) => ({ PORT_WEB: String(ports[1]) }),
     });
+    const printEnv =
+      'node -e "setTimeout(() => console.log([process.env.HARNESS_SLOT, process.env.PORT, process.env.PORT_WEB, process.env.PORT_API ?? \'unset\'].join(\':\')), 80)"';
 
-    const [resA, resB] = await Promise.all([
-      runner.exec(
-        'node -e "setTimeout(() => console.log(process.env.HARNESS_SLOT + \':\' + process.env.PORT_API + \':\' + process.env.PORT_WEB), 80)"',
-      ),
-      runner.exec(
-        'node -e "setTimeout(() => console.log(process.env.HARNESS_SLOT + \':\' + process.env.PORT_API + \':\' + process.env.PORT_WEB), 80)"',
-      ),
-    ]);
+    const [resA, resB] = await Promise.all([runner.exec(printEnv), runner.exec(printEnv)]);
 
-    const seenSlots = new Set([resA.slotIndex, resB.slotIndex]);
-    expect.soft(seenSlots).toEqual(new Set([0, 1]));
-    expect.soft(resA.stdout.trim()).toBe(
-      `${resA.slotIndex}:${19000 + resA.slotIndex * 10}:${19001 + resA.slotIndex * 10}`,
-    );
-    expect.soft(resB.stdout.trim()).toBe(
-      `${resB.slotIndex}:${19000 + resB.slotIndex * 10}:${19001 + resB.slotIndex * 10}`,
-    );
+    expect.soft(new Set([resA.slotIndex, resB.slotIndex])).toEqual(new Set([0, 1]));
+    for (const res of [resA, resB]) {
+      const base = 19000 + res.slotIndex * 3;
+      expect.soft(res.slotPorts).toEqual([base, base + 1, base + 2]);
+      expect.soft(res.stdout.trim()).toBe(`${res.slotIndex}:${base}:${base + 1}:unset`);
+    }
   });
 
   it('kills the entire child process tree when inactivityTimeoutMs fires', async () => {

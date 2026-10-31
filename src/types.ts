@@ -63,8 +63,6 @@ export interface ExecutionContext {
   readonly stepName: string;
   readonly projectDir: string;
   readonly workDir: string;
-  readonly slotIndex: number;
-  readonly slotPorts: readonly number[];
   readonly touchedPaths: readonly string[];
   readonly store: HarnessStore;
   readonly hookServerUrl?: string;

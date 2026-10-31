@@ -5,7 +5,7 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, describe, expect, it } from 'vitest';
-import { H, startOrchestrator, z } from '../../src/index.js';
+import { H, HarnessStore, startOrchestrator, z } from '../../src/index.js';
 import {
   fileLeaseGuard,
   gitWorktreeIsolation,
@@ -71,6 +71,25 @@ describe('First-Party Plugins & Head MCP Server', () => {
     expect.soft(existsSync(observedWorkDir)).toBe(false);
 
     await orch.close();
+  });
+
+  it('blocks Stop by a custom verdict on a command whose output is not { passed, summary }', async () => {
+    const repoDir = makeGitRepo();
+    const store = new HarnessStore(repoDir);
+    const Lint = H.command('lint')
+      .input(z.object({ dir: z.string() }))
+      .output(z.object({ exitCode: z.number(), log: z.string() }))
+      .run(({ input }) => ({ exitCode: 2, log: `3 errors in ${path.basename(input.dir)}` }));
+    const hook = stopCommandHook(Lint, {
+      mapInput: ({ workDir }) => ({ dir: workDir }),
+      verdict: (out) => ({ allow: out.exitCode === 0, reason: out.log }),
+    });
+    const event = { phase: 'stop', intent: null, filePaths: [] } as const;
+    await expect(hook.stop!.handle(event, { runId: 'run-L', store, workDir: repoDir })).resolves.toEqual({
+      allow: false,
+      reason: `3 errors in ${path.basename(repoDir)}`,
+    });
+    store.close();
   });
 
   it('serves Head MCP tools, enforces fileLeaseGuard and stopCommandHook even when agent transcript_path is high, and resolves halted runs', async () => {
@@ -247,7 +266,7 @@ describe('First-Party Plugins & Head MCP Server', () => {
         id: 'CD-777',
         title: 'Add ledger check',
         status: 'ready',
-        touches: ['apps/edge/**'],
+        frontmatter: { touches: ['apps/edge/**'] },
         body: 'Verify ledger balances.',
       },
     });

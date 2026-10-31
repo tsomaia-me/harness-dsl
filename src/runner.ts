@@ -10,6 +10,8 @@ export interface LocalRunnerOptions {
   readonly id?: string;
   readonly maxConcurrentSlots?: number;
   readonly slotPortBase?: number;
+  readonly portsPerSlot?: number;
+  readonly slotEnv?: (slotIndex: number, ports: readonly number[]) => Record<string, string>;
   readonly timeoutMs?: number;
   readonly inactivityTimeoutMs?: number;
 }
@@ -99,6 +101,8 @@ abstract class BaseSlotRunner implements Runner {
   public abstract readonly kind: 'local' | 'ssh';
   protected readonly maxConcurrentSlots: number;
   protected readonly slotPortBase: number;
+  protected readonly portsPerSlot: number;
+  private readonly slotEnv?: (slotIndex: number, ports: readonly number[]) => Record<string, string>;
   protected readonly defaultTimeoutMs: number;
   protected readonly defaultInactivityTimeoutMs: number;
   private readonly queue: PQueue;
@@ -108,6 +112,8 @@ abstract class BaseSlotRunner implements Runner {
     this.id = id;
     this.maxConcurrentSlots = opts?.maxConcurrentSlots ?? 2;
     this.slotPortBase = opts?.slotPortBase ?? 18000;
+    this.portsPerSlot = opts?.portsPerSlot ?? 10;
+    this.slotEnv = opts?.slotEnv;
     this.defaultTimeoutMs = opts?.timeoutMs ?? 10 * 60_000;
     this.defaultInactivityTimeoutMs = opts?.inactivityTimeoutMs ?? 2 * 60_000;
     this.queue = new PQueue({ concurrency: this.maxConcurrentSlots });
@@ -117,12 +123,15 @@ abstract class BaseSlotRunner implements Runner {
     for (let i = 0; i < this.maxConcurrentSlots; i += 1) {
       if (!this.occupiedSlots.has(i)) {
         this.occupiedSlots.add(i);
-        const base = this.slotPortBase + i * 10;
-        const slotPorts = Array.from({ length: 10 }, (_, idx) => base + idx);
-        return { slotIndex: i, slotPorts };
+        return { slotIndex: i, slotPorts: this.portsForSlot(i) };
       }
     }
     throw new Error(`No free slot available on runner ${this.id}`);
+  }
+
+  protected portsForSlot(slotIndex: number): number[] {
+    const base = this.slotPortBase + slotIndex * this.portsPerSlot;
+    return Array.from({ length: this.portsPerSlot }, (_, idx) => base + idx);
   }
 
   protected releaseSlot(slotIndex: number): void {
@@ -137,10 +146,8 @@ abstract class BaseSlotRunner implements Runner {
     return {
       HARNESS_SLOT: String(slotIndex),
       PORT: String(slotPorts[0]),
-      PORT_API: String(slotPorts[0]),
-      PORT_WEB: String(slotPorts[1]),
-      PORT_ADMIN: String(slotPorts[2]),
-      ...(extraEnv ?? {}),
+      ...this.slotEnv?.(slotIndex, slotPorts),
+      ...extraEnv,
     };
   }
 
@@ -355,9 +362,7 @@ export class SshRunner extends BaseSlotRunner {
     slotIndex: number,
     extraEnv?: Record<string, string>,
   ): string[] {
-    const base = this.slotPortBase + slotIndex * 10;
-    const slotPorts = Array.from({ length: 10 }, (_, idx) => base + idx);
-    const envVars = this.buildSlotEnv(slotIndex, slotPorts, extraEnv);
+    const envVars = this.buildSlotEnv(slotIndex, this.portsForSlot(slotIndex), extraEnv);
     const envPrefix = Object.entries(envVars)
       .map(([k, v]) => `${k}=${v.replace(/'/g, "'\\''")}`)
       .join(' ');

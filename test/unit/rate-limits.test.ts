@@ -240,8 +240,6 @@ describe('Rate-limit detection in drivers', () => {
       stepName: 'step',
       projectDir: dir,
       workDir: dir,
-      slotIndex: 0,
-      slotPorts: [],
       touchedPaths: [],
       store,
       signal: new AbortController().signal,

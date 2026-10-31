@@ -251,6 +251,41 @@ describe('FlowEngine Combinators & Userland Arbitration Composition', () => {
     store.close();
   });
 
+  it.each([
+    {
+      label: 'takes the ticket id and touched paths from identify()',
+      identified: true,
+      expected: { ticketId: 'CD-9', touchedPaths: ['apps/edge/**'] },
+    },
+    {
+      label: 'reads nothing from input fields a flow did not name',
+      identified: false,
+      expected: { ticketId: null, touchedPaths: [] },
+    },
+  ])('$label', async ({ identified, expected }) => {
+    const { store, engine } = makeEngine();
+    const TicketInput = z.object({ id: z.string(), key: z.string(), touches: z.array(z.string()), files: z.array(z.string()) });
+    const SeePaths = H.command('see-paths')
+      .input(z.any())
+      .output(z.object({ touchedPaths: z.array(z.string()) }))
+      .run(({ ctx }) => ({ touchedPaths: [...ctx.touchedPaths] }));
+    const base = H.flow('identity-flow').input(TicketInput);
+    const flow = (identified
+      ? base.identify({ ticketId: (input) => input.key, touchedPaths: (input) => input.files })
+      : base
+    ).step('see', SeePaths);
+
+    const result = await engine.run(flow, {
+      id: 'sniffed-id',
+      key: 'CD-9',
+      touches: ['sniffed/**'],
+      files: ['apps/edge/**'],
+    });
+    expect.soft(store.getRun(result.runId)?.ticketId ?? null).toBe(expected.ticketId);
+    expect.soft(result.steps.see.touchedPaths).toEqual(expected.touchedPaths);
+    store.close();
+  });
+
   it('executes .branch() and .batch() via Cloud Batch API when items.length > 1 and runs skill .assert()', async () => {
     const { store, engine } = makeEngine();
 

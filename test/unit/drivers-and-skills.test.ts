@@ -26,8 +26,6 @@ describe('Drivers, Skills, Commands, and Agent Execution', () => {
       stepName: 'step-1',
       projectDir: dir,
       workDir: dir,
-      slotIndex: 0,
-      slotPorts: [18000, 18001, 18002],
       touchedPaths: ['apps/admin/src/UsersPage.tsx'],
       store,
       hookServerUrl: 'http://127.0.0.1:4100',

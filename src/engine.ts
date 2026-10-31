@@ -61,19 +61,8 @@ export class FlowEngine {
     const runId = opts?.runId ?? `run-${randomUUID()}`;
     const signal = opts?.signal ?? new AbortController().signal;
     const baseWorkDir = opts?.workDir ?? this.store.projectDir;
-    const touchedPaths =
-      opts?.touchedPaths ??
-      (parsedInput &&
-      typeof parsedInput === 'object' &&
-      Array.isArray((parsedInput as any).touches)
-        ? ((parsedInput as any).touches as string[])
-        : []);
-
-    const ticketId =
-      opts?.ticketId ??
-      (parsedInput && typeof parsedInput === 'object' && typeof (parsedInput as any).id === 'string'
-        ? String((parsedInput as any).id)
-        : undefined);
+    const touchedPaths = opts?.touchedPaths ?? flow.identifiers.touchedPaths?.(parsedInput) ?? [];
+    const ticketId = opts?.ticketId ?? flow.identifiers.ticketId?.(parsedInput);
 
     this.store.createRun({
       id: runId,
@@ -89,8 +78,6 @@ export class FlowEngine {
       stepName: 'init',
       projectDir: this.store.projectDir,
       workDir: baseWorkDir,
-      slotIndex: 0,
-      slotPorts: [18000, 18001, 18002],
       touchedPaths,
       store: this.store,
       hookServerUrl: opts?.hookServerUrl,
