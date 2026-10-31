@@ -62,7 +62,7 @@ export interface AiSdkDriverOptions {
   readonly apiKeyEnv?: string;
   readonly apiKey?: string;
   readonly baseURL?: string;
-  readonly customFetch?: typeof fetch;
+  readonly fetch?: typeof fetch;
   readonly rateLimits?: RateLimitAdapter;
   readonly pricing?: PricingAdapter;
   readonly batch?: BatchAdapter | false;
@@ -74,7 +74,7 @@ export class AiSdkDriver implements Driver {
   private readonly apiKeyEnv?: string;
   private readonly explicitApiKey?: string;
   private readonly baseURL?: string;
-  private readonly customFetch?: typeof fetch;
+  private readonly fetchFn?: typeof fetch;
   private readonly rateLimits: RateLimitAdapter;
   private readonly pricing: PricingAdapter;
   public readonly batch?: BatchAdapter;
@@ -84,7 +84,7 @@ export class AiSdkDriver implements Driver {
     this.apiKeyEnv = opts.apiKeyEnv ?? this.preset.apiKeyEnv;
     this.explicitApiKey = opts.apiKey;
     this.baseURL = opts.baseURL;
-    this.customFetch = opts.customFetch;
+    this.fetchFn = opts.fetch;
     this.rateLimits = opts.rateLimits ?? this.preset.rateLimits ?? ietfRateLimits;
     this.pricing = opts.pricing ?? this.preset.pricing ?? UNPRICED;
     this.batch =
@@ -94,7 +94,7 @@ export class AiSdkDriver implements Driver {
           this.preset.createBatch?.({
             apiKey: () => this.requireApiKey(),
             baseURL: this.baseURL,
-            fetch: this.customFetch,
+            fetch: this.fetchFn,
             pricing: this.pricing,
           }));
   }
@@ -113,7 +113,7 @@ export class AiSdkDriver implements Driver {
     return {
       apiKey: this.explicitApiKey || this.apiKeyEnv ? this.requireApiKey() : undefined,
       baseURL: this.baseURL,
-      fetch: this.customFetch,
+      fetch: this.fetchFn,
     };
   }
 

@@ -236,7 +236,7 @@ describe('Rate-limit detection in drivers', () => {
         }),
         { status: 429, headers: { 'content-type': 'application/json', 'retry-after-ms': '0' } },
       )) as typeof fetch;
-    const driver = H.drivers.aiSdk({ provider: 'google', apiKey: 'test-key', customFetch });
+    const driver = H.drivers.aiSdk({ provider: 'google', apiKey: 'test-key', fetch: customFetch });
     const before = Date.now();
     const error = await driver.invoke(invokeRequest()).catch((err: unknown) => err);
     expect.soft(error).toBeInstanceOf(RateLimitedError);
@@ -258,7 +258,7 @@ describe('Rate-limit detection in drivers', () => {
         },
       });
     }) as typeof fetch;
-    const driver = H.drivers.aiSdk({ provider: 'openai', apiKey: 'test-key', customFetch });
+    const driver = H.drivers.aiSdk({ provider: 'openai', apiKey: 'test-key', fetch: customFetch });
 
     const error = await driver.invoke(invokeRequest()).catch((err: unknown) => err);
     expect.soft(calls).toBeGreaterThan(1);

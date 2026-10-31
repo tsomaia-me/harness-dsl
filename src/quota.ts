@@ -108,7 +108,7 @@ export class AccountDef implements AccountProvider {
       this.id,
       this.driver,
       this.maxQuotaShareValue,
-      mergeQuotaPolicy(this.quotaPolicyOverride, override),
+      override,
     );
   }
 

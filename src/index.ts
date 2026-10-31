@@ -1,12 +1,17 @@
 export { z } from 'zod';
 export {
   AgentDef,
+  type AgentOptions,
   BoundAgentSkill,
   CommandDef,
   ConditionalExecutable,
   FlowDef,
+  type FlowIdentifiers,
+  type FlowOptions,
   H,
+  HandoffLimitError,
   HeadDef,
+  type HeadOptions,
   ModelDef,
   parseEnvFile,
   SkillDef,
@@ -14,6 +19,7 @@ export {
 export {
   AiSdkDriver,
   type AiSdkDriverOptions,
+  CLAUDE_SUBSCRIPTION_QUOTA_POLICY,
   ClaudeCliDriver,
   type ClaudeCliDriverOptions,
   CustomDriver,
@@ -24,6 +30,7 @@ export {
   type ProviderConnection,
   type ProviderOptions,
   type ProviderPreset,
+  type SdkProviderName,
 } from './drivers/index.js';
 export {
   ANTHROPIC_BATCH_DEFAULTS,
@@ -37,7 +44,7 @@ export {
   type FlowRunResult,
   MaxIterationsReachedError,
 } from './engine.js';
-export { HOOK_PATH, hookEndpointUrl } from './hooks.js';
+export { hookEndpointUrl } from './hooks.js';
 export { HarnessMcpServer, startOrchestrator } from './mcp.js';
 export { claudeCodeHookProtocol, readClaudeCodeTranscriptTokens } from './protocols/claude-code.js';
 export {
@@ -62,11 +69,19 @@ export {
   type TokenRates,
 } from './pricing/index.js';
 export {
+  ANTHROPIC_5H_WINDOW,
+  ANTHROPIC_7D_WINDOW,
   anthropicRateLimits,
   composeRateLimits,
   googleRateLimits,
+  type HeaderRecord,
   ietfRateLimits,
+  lowercaseHeaders,
+  numericHeader,
   openaiRateLimits,
+  quotaPatch,
+  remainingWindow,
+  retryAfterCooldown,
 } from './rate-limits/index.js';
 export {
   CommandTimeoutError,
@@ -82,6 +97,7 @@ export {
 export {
   type AccountQuotaPatch,
   type AccountQuotaState,
+  type StoredQuotaWindow,
   HarnessStore,
   LessonSchema,
   type TicketRecord,
@@ -91,6 +107,8 @@ export type {
   AgentPlugin,
   HookDecision,
   HookProtocol,
+  HookReceiver,
+  HookRegistration,
   HookSubscriptions,
   PluginContext,
   PluginHandler,

@@ -1,8 +1,9 @@
 import type { QuotaPatch, QuotaWindowPatch } from '../types.js';
+import { ANTHROPIC_5H_WINDOW, ANTHROPIC_7D_WINDOW } from './anthropic.js';
 
 const UNIFIED_WINDOW_IDS: Readonly<Record<string, string>> = {
-  five_hour: 'anthropic:5h',
-  seven_day: 'anthropic:7d',
+  five_hour: ANTHROPIC_5H_WINDOW,
+  seven_day: ANTHROPIC_7D_WINDOW,
 };
 
 function unifiedWindowId(rateLimitType: string): string {

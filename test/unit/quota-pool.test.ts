@@ -202,6 +202,14 @@ describe('Reactive Account Pool & Quota Engine', () => {
     store.close();
   });
 
+  it('replaces, not merges, an earlier account policy override', () => {
+    const acct = new AccountDef('acct-p', createDummyDriver())
+      .quotaPolicy({ tokenBudget: 1_000, defaultThreshold: 0.5 })
+      .quotaPolicy({ defaultThreshold: 0.7 });
+    expect.soft(acct.effectiveQuotaPolicy.defaultThreshold).toBe(0.7);
+    expect(acct.effectiveQuotaPolicy.tokenBudget).toBeNull();
+  });
+
   it('re-probes an account that keeps being acquired once the probe goes stale', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const start = Date.UTC(2026, 9, 31, 12);

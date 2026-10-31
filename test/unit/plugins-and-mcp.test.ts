@@ -73,6 +73,21 @@ describe('First-Party Plugins & Head MCP Server', () => {
     await orch.close();
   });
 
+  it('runs a stop command with only the work dir when the hook is given no mapInput', async () => {
+    const repoDir = makeGitRepo();
+    const store = new HarnessStore(repoDir);
+    const Echo = H.command('echo-input')
+      .input(z.any())
+      .output(z.object({ passed: z.boolean(), summary: z.string() }))
+      .run(({ input }) => ({ passed: false, summary: JSON.stringify(input) }));
+    const event = { phase: 'stop', intent: null, filePaths: [], raw: {} } as const;
+    await expect(stopCommandHook(Echo).stop!.handle(event, { runId: 'run-E', store, workDir: repoDir })).resolves.toEqual({
+      allow: false,
+      reason: JSON.stringify({ workDir: repoDir }),
+    });
+    store.close();
+  });
+
   it('blocks Stop by a custom verdict on a command whose output is not { passed, summary }', async () => {
     const repoDir = makeGitRepo();
     const store = new HarnessStore(repoDir);

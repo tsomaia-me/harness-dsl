@@ -5,37 +5,46 @@ export interface StopCheckOutput {
   readonly summary?: string;
 }
 
-export interface StopCommandHookOptions<TInput, TOutput> {
-  readonly mapInput?: (ctx: { runId: string; workDir: string }) => TInput;
-  readonly verdict?: (output: TOutput) => HookDecision;
+export type StopVerdict = Pick<HookDecision, 'allow' | 'reason'>;
+
+export interface StopHookContext {
+  readonly runId: string;
+  readonly workDir: string;
 }
 
-function passedVerdict(output: StopCheckOutput): HookDecision {
-  return { allow: output.passed === true, reason: output.summary };
+type MapInputOption<TInput> = [{ workDir: string }] extends [TInput]
+  ? { readonly mapInput?: (ctx: StopHookContext) => TInput }
+  : { readonly mapInput: (ctx: StopHookContext) => TInput };
+
+type VerdictOption<TOutput> = [TOutput] extends [StopCheckOutput]
+  ? { readonly verdict?: (output: TOutput) => StopVerdict }
+  : { readonly verdict: (output: TOutput) => StopVerdict };
+
+export type StopCommandHookOptions<TInput, TOutput> = MapInputOption<TInput> & VerdictOption<TOutput>;
+
+type OptionsArgument<TInput, TOutput> = {} extends StopCommandHookOptions<TInput, TOutput>
+  ? [opts?: StopCommandHookOptions<TInput, TOutput>]
+  : [opts: StopCommandHookOptions<TInput, TOutput>];
+
+function passedVerdict(output: unknown): StopVerdict {
+  const check = output as StopCheckOutput;
+  return { allow: check.passed === true, reason: check.summary };
 }
 
-export function stopCommandHook<TInput, TOutput extends StopCheckOutput>(
-  command: Executable<TInput, TOutput>,
-  opts?: StopCommandHookOptions<TInput, TOutput>,
-): AgentPlugin;
 export function stopCommandHook<TInput, TOutput>(
   command: Executable<TInput, TOutput>,
-  opts: StopCommandHookOptions<TInput, TOutput> & { readonly verdict: (output: TOutput) => HookDecision },
-): AgentPlugin;
-export function stopCommandHook<TInput, TOutput>(
-  command: Executable<TInput, TOutput>,
-  opts?: StopCommandHookOptions<TInput, TOutput>,
+  ...[opts]: OptionsArgument<TInput, TOutput>
 ): AgentPlugin {
-  const verdict = opts?.verdict ?? (passedVerdict as unknown as (output: TOutput) => HookDecision);
+  const options = opts as
+    | { readonly mapInput?: (ctx: StopHookContext) => TInput; readonly verdict?: (output: TOutput) => StopVerdict }
+    | undefined;
+  const mapInput = options?.mapInput ?? ((ctx: StopHookContext) => ({ workDir: ctx.workDir }) as TInput);
+  const verdict = options?.verdict ?? passedVerdict;
   return {
     name: `stopCommandHook:${command.name}`,
     stop: {
       async handle(_event, ctx) {
-        const input = opts?.mapInput
-          ? opts.mapInput({ runId: ctx.runId, workDir: ctx.workDir })
-          : ({ worktreePath: ctx.workDir, workDir: ctx.workDir } as unknown as TInput);
-
-        const output = await command.execute(input, {
+        const output = await command.execute(mapInput({ runId: ctx.runId, workDir: ctx.workDir }), {
           runId: ctx.runId,
           iteration: 0,
           stepName: `stop-hook:${command.name}`,

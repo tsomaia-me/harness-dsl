@@ -8,6 +8,7 @@ import { hookEndpointUrl } from '../hooks.js';
 import { anthropicPricing } from '../pricing/anthropic.js';
 import { claudeCodeHookProtocol } from '../protocols/claude-code.js';
 import { RateLimitedError } from '../quota.js';
+import { ANTHROPIC_5H_WINDOW, ANTHROPIC_7D_WINDOW } from '../rate-limits/anthropic.js';
 import {
   CLAUDE_CLI_RATE_LIMIT_TEXT,
   parseRateLimitResetFromMessage,
@@ -24,9 +25,9 @@ import type {
 } from '../types.js';
 
 export const CLAUDE_SUBSCRIPTION_QUOTA_POLICY: Partial<QuotaPolicy> = {
-  thresholds: { 'anthropic:5h': 0.95, 'anthropic:7d': 0.98 },
+  thresholds: { [ANTHROPIC_5H_WINDOW]: 0.95, [ANTHROPIC_7D_WINDOW]: 0.98 },
   tokenBudget: 5_000_000,
-  shareResetWindowId: 'anthropic:7d',
+  shareResetWindowId: ANTHROPIC_7D_WINDOW,
 };
 
 export interface ClaudeCliSpawnBridge {

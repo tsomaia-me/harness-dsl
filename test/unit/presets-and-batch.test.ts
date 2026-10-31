@@ -170,7 +170,7 @@ describe('Anthropic batch adapter', () => {
       usage: { input_tokens: 1_000, cache_read_input_tokens: 0, output_tokens: 200 },
       content: [{ type: 'text', text: '{"severity":"low"}' }],
     });
-    const driver = H.drivers.aiSdk({ provider: 'anthropic', apiKey: 'k', customFetch: fetchFn, pricing: driverPricing });
+    const driver = H.drivers.aiSdk({ provider: 'anthropic', apiKey: 'k', fetch: fetchFn, pricing: driverPricing });
     const { batchId } = await driver.batch!.submit(
       [{ customId: 'item-0', systemPrompt: 'Audit', userPrompt: 'x', outputJsonSchema: SCHEMA }],
       'claude-opus-5-5',
