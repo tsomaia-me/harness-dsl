@@ -3,7 +3,7 @@ import { APICallError, generateText, jsonSchema, type LanguageModel, Output, Ret
 import { anthropicPreset } from '../presets/anthropic.js';
 import { googlePreset } from '../presets/google.js';
 import { openaiPreset } from '../presets/openai.js';
-import { RateLimitedError } from '../quota.js';
+import { AccountUnavailableError, RateLimitedError } from '../quota.js';
 import { ietfRateLimits } from '../rate-limits/ietf.js';
 import type {
   BatchAdapter,
@@ -164,6 +164,11 @@ export class AiSdkDriver implements Driver {
       };
     } catch (err) {
       const apiError = RetryError.isInstance(err) ? err.lastError : err;
+      const authFailed =
+        APICallError.isInstance(apiError) && (apiError.statusCode === 401 || apiError.statusCode === 403);
+      if (authFailed) {
+        throw new AccountUnavailableError(req.accountId, apiError.message);
+      }
       if (APICallError.isInstance(apiError) && apiError.statusCode === 429) {
         throw new RateLimitedError(
           req.accountId,

@@ -32,6 +32,9 @@ export function readClaudeCliRateLimitEvent(event: Record<string, any>): ClaudeC
   };
 }
 
+export const CLAUDE_CLI_AUTH_FAILURE_TEXT =
+  /\bnot logged in\b|please run \/login|\boauth token (?:has )?expired\b|\binvalid api key\b/i;
+
 export const CLAUDE_CLI_RATE_LIMIT_TEXT = /\brate[ -]?limit(?:ed|s)?\b|\busage limit\b|\b429\b/i;
 
 export function parseRateLimitResetFromMessage(msg: string, nowMs = Date.now()): number | null {

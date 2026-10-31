@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { drivers } from './drivers/index.js';
 import { DEFAULT_HANDOFF_BUFFER_TOKENS, DEFAULT_MAX_HANDOFFS } from './defaults.js';
 import { claudeCodeHookProtocol } from './protocols/claude-code.js';
-import { AccountDef, applyQuotaPatch, PoolDef, RateLimitedError } from './quota.js';
+import { AccountDef, AccountUnavailableError, applyQuotaPatch, PoolDef, RateLimitedError } from './quota.js';
 import type { FinishInvocationInput } from './store.js';
 import { LocalRunner, type LocalRunnerOptions, SshRunner, type SshRunnerOptions } from './runner.js';
 import type {
@@ -523,6 +523,16 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
       } catch (err: any) {
         if (err instanceof HandoffLimitError) {
           throw err;
+        }
+
+        if (err instanceof AccountUnavailableError) {
+          ctx.store.upsertAccountQuota(resolvedAccount.accountId, {
+            cooldownUntilMs: Date.now() + resolvedAccount.quotaPolicy.unavailableCooldownMs,
+            unavailableReason: err.reason,
+          });
+          finishAndCharge({ status: 'fail', errorText: err.message });
+          isRetrySession = false;
+          continue;
         }
 
         if (err instanceof RateLimitedError) {

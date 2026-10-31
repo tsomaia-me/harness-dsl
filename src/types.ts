@@ -46,6 +46,7 @@ export interface QuotaPolicy {
   readonly tokenBudget: number | null;
   readonly shareResetWindowId: string | null;
   readonly defaultCooldownMs: number;
+  readonly unavailableCooldownMs: number;
 }
 
 export interface TokenCounts {

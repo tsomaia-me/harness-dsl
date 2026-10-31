@@ -7,9 +7,10 @@ import { DEFAULT_HANDOFF_BUFFER_TOKENS } from '../defaults.js';
 import { hookEndpointUrl } from '../hooks.js';
 import { anthropicPricing } from '../pricing/anthropic.js';
 import { claudeCodeHookProtocol } from '../protocols/claude-code.js';
-import { RateLimitedError } from '../quota.js';
+import { AccountUnavailableError, RateLimitedError } from '../quota.js';
 import { ANTHROPIC_5H_WINDOW, ANTHROPIC_7D_WINDOW } from '../rate-limits/anthropic.js';
 import {
+  CLAUDE_CLI_AUTH_FAILURE_TEXT,
   CLAUDE_CLI_RATE_LIMIT_TEXT,
   parseRateLimitResetFromMessage,
   readClaudeCliRateLimitEvent,
@@ -197,6 +198,7 @@ export class ClaudeCliDriver implements Driver {
     let latestQuota: QuotaPatch = {};
     let rejectedUntilMs: number | null = null;
     let turnRateLimited = false;
+    let authFailed = false;
     let errorText = '';
 
     const onLine = (line: string) => {
@@ -257,7 +259,10 @@ export class ClaudeCliDriver implements Driver {
 
         if (event.type === 'error' || event.is_error === true) {
           errorText = String(event.error?.message ?? event.result ?? '');
-          if (event.api_error_status === 429 || CLAUDE_CLI_RATE_LIMIT_TEXT.test(errorText)) {
+          const authStatus = event.api_error_status === 401 || event.api_error_status === 403;
+          if (authStatus || CLAUDE_CLI_AUTH_FAILURE_TEXT.test(errorText)) {
+            authFailed = true;
+          } else if (event.api_error_status === 429 || CLAUDE_CLI_RATE_LIMIT_TEXT.test(errorText)) {
             turnRateLimited = true;
           }
         }
@@ -276,6 +281,11 @@ export class ClaudeCliDriver implements Driver {
         req.inactivityTimeoutMs,
         req.signal,
       );
+
+      const failedWithoutOutput = exitCode !== 0 && structuredOutput === undefined;
+      if (authFailed || (failedWithoutOutput && CLAUDE_CLI_AUTH_FAILURE_TEXT.test(stderr))) {
+        throw new AccountUnavailableError(req.accountId, (errorText || stderr).trim());
+      }
 
       const failedWithRateLimitText =
         exitCode !== 0 && structuredOutput === undefined && CLAUDE_CLI_RATE_LIMIT_TEXT.test(stderr);

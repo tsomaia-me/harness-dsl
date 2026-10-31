@@ -41,6 +41,18 @@ export class RateLimitedError extends Error {
   }
 }
 
+export class AccountUnavailableError extends Error {
+  public readonly accountId: string;
+  public readonly reason: string;
+
+  public constructor(accountId: string, reason: string) {
+    super(`Account "${accountId}" is unavailable: ${reason}`);
+    this.name = 'AccountUnavailableError';
+    this.accountId = accountId;
+    this.reason = reason;
+  }
+}
+
 export const DEFAULT_QUOTA_POLICY: QuotaPolicy = {
   thresholds: {},
   defaultThreshold: 0.95,
@@ -48,6 +60,7 @@ export const DEFAULT_QUOTA_POLICY: QuotaPolicy = {
   tokenBudget: null,
   shareResetWindowId: null,
   defaultCooldownMs: 60_000,
+  unavailableCooldownMs: 15 * 60_000,
 };
 
 function mergeQuotaPolicy<T extends Partial<QuotaPolicy>>(
@@ -150,7 +163,7 @@ export class AccountDef implements AccountProvider {
       if (resetWindows.length > 0 || staleWindows.length > 0 || cooldownExpired) {
         store.upsertAccountQuota(this.id, {
           windows: [...resetWindows, ...staleWindows].map((w) => ({ id: w.id, utilization: 0, resetsAtMs: null })),
-          cooldownUntilMs: cooldownExpired ? null : undefined,
+          ...(cooldownExpired ? { cooldownUntilMs: null, unavailableReason: null } : {}),
           ...(shareWindowReset ? { projectShareUsed: 0, windowTokensUsed: 0 } : {}),
         });
         state = store.getAccountQuota(this.id);

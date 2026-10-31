@@ -48,6 +48,7 @@ export const accountQuotas = sqliteTable('account_quotas', {
   projectShareUsed: real('project_share_used').notNull().default(0),
   windowTokensUsed: integer('window_tokens_used').notNull().default(0),
   cooldownUntilMs: integer('cooldown_until_ms'),
+  unavailableReason: text('unavailable_reason'),
   probedAtMs: integer('probed_at_ms'),
   acquiredAtMs: integer('acquired_at_ms'),
 });

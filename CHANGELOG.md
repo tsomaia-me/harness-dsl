@@ -25,7 +25,8 @@ The core no longer names a provider, CLI, model, header, price, hook format, tra
 ### Fixed
 
 **Rate limits**
-- A successful Claude CLI run whose output mentioned "rate limit" was treated as rate limited. Errors naming `rate_limiter` / `ratelimit.ts` were too. "Not logged in" is no longer a rate limit.
+- A successful Claude CLI run whose output mentioned "rate limit" was treated as rate limited. Errors naming `rate_limiter` / `ratelimit.ts` were too.
+- "Not logged in" was treated as a rate limit, which hid logged-out pool accounts behind the paid fallback. An authentication failure (logged out, expired OAuth token, invalid key, HTTP 401/403) now throws `AccountUnavailableError`. It takes the account out of rotation for `QuotaPolicy.unavailableCooldownMs` (default 15 minutes), shows it as `UNAVAILABLE: <reason>` on BOARD.md, and fails over to the next account.
 - AI SDK 429s arrive wrapped in `RetryError`, and their rate-limit headers were never read.
 - A rate limit whose cooldown was already over (`Retry-After: 0`, a past reset) made the skill loop retry forever.
 

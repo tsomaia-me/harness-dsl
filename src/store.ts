@@ -89,6 +89,7 @@ export interface AccountQuotaState {
   readonly projectShareUsed: number;
   readonly windowTokensUsed: number;
   readonly cooldownUntilMs: number | null;
+  readonly unavailableReason: string | null;
   readonly probedAtMs: number | null;
   readonly acquiredAtMs: number | null;
 }
@@ -96,6 +97,7 @@ export interface AccountQuotaState {
 export interface AccountQuotaPatch extends QuotaPatch {
   readonly projectShareUsed?: number;
   readonly windowTokensUsed?: number;
+  readonly unavailableReason?: string | null;
   readonly probedAtMs?: number | null;
   readonly acquiredAtMs?: number | null;
 }
@@ -727,8 +729,12 @@ export class HarnessStore {
                 return countdown === '—' ? usage : `${usage} (${countdown})`;
               });
               const share = `${Math.round(q.projectShareUsed * 100)}%`;
-              const status =
-                q.cooldownUntilMs && q.cooldownUntilMs > nowMs ? 'COOLDOWN' : 'READY';
+              const inCooldown = q.cooldownUntilMs !== null && q.cooldownUntilMs > nowMs;
+              const status = !inCooldown
+                ? 'READY'
+                : q.unavailableReason
+                  ? `UNAVAILABLE: ${q.unavailableReason.replace(/\|/g, '/')}`
+                  : 'COOLDOWN';
               return `| ${[`\`${q.accountId}\``, ...windowCells, share, status].join(' | ')} |`;
             })
             .join('\n') + '\n';

@@ -150,10 +150,11 @@ export interface QuotaPolicy {
   readonly tokenBudget: number | null;                     // null: project share is not derived from tokens
   readonly shareResetWindowId: string | null;              // the window whose reset frees the project share
   readonly defaultCooldownMs: number;                      // a rate limit that names no reset
+  readonly unavailableCooldownMs: number;                  // an account that failed authentication
 }
 ```
 
-`DEFAULT_QUOTA_POLICY` is `{ thresholds: {}, defaultThreshold: 0.95, probeStalenessMs: 60_000, tokenBudget: null, shareResetWindowId: null, defaultCooldownMs: 60_000 }`. An account's effective policy is the core default, then its driver's `quotaPolicy`, then `H.account(...).quotaPolicy({...})`; thresholds merge per window. The Claude CLI driver supplies `{ thresholds: { 'anthropic:5h': 0.95, 'anthropic:7d': 0.98 }, tokenBudget: 5_000_000, shareResetWindowId: 'anthropic:7d' }`.
+`DEFAULT_QUOTA_POLICY` is `{ thresholds: {}, defaultThreshold: 0.95, probeStalenessMs: 60_000, tokenBudget: null, shareResetWindowId: null, defaultCooldownMs: 60_000, unavailableCooldownMs: 900_000 }`. An account's effective policy is the core default, then its driver's `quotaPolicy`, then `H.account(...).quotaPolicy({...})`; thresholds merge per window. The Claude CLI driver supplies `{ thresholds: { 'anthropic:5h': 0.95, 'anthropic:7d': 0.98 }, tokenBudget: 5_000_000, shareResetWindowId: 'anthropic:7d' }`.
 
 ### §2.3 Usage, pricing and rate limits
 
@@ -386,6 +387,7 @@ export const accountQuotas = sqliteTable('account_quotas', {
   projectShareUsed: real('project_share_used').notNull().default(0),
   windowTokensUsed: integer('window_tokens_used').notNull().default(0),
   cooldownUntilMs: integer('cooldown_until_ms'),
+  unavailableReason: text('unavailable_reason'),
   probedAtMs: integer('probed_at_ms'),
   acquiredAtMs: integer('acquired_at_ms'),
 });
@@ -448,6 +450,7 @@ The skill runner and the batch path charge each finished invocation's tokens to 
 
 - **HTTP drivers:** The AI SDK driver passes the response (status, headers and, on a `429`, the parsed error body) to its `RateLimitAdapter` on every success and every `429`. First-party adapters: `anthropicRateLimits` (`anthropic-ratelimit-unified-{5h,7d}-*` → `anthropic:5h`/`anthropic:7d`, `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-*` → `anthropic:<kind>`), `openaiRateLimits` (`x-ratelimit-{limit,remaining,reset}-{requests,tokens}` with `6m0s`/`500ms` durations → `openai:<kind>`, `retry-after-ms`), and `ietfRateLimits` (`RateLimit-Limit/Remaining/Reset` → `http:ratelimit`, `Retry-After` as seconds or HTTP-date). `googleRateLimits` adds `google.rpc.RetryInfo.retryDelay` from the Gemini error body to the IETF headers. `composeRateLimits(...)` merges adapters, keeping the last adapter's window per id and the latest cooldown. `generateText` retries a `429` itself and then throws `RetryError`; the driver reads the status and headers from its `lastError`.
 - **Claude CLI driver:** Reads the stream-json `rate_limit_event` (`rate_limit_info.unifiedWindows.{five_hour,seven_day}.{utilization,resetsAt}` → `anthropic:5h`/`anthropic:7d`) on every run and returns it as the `quotaHint`. A turn counts as rate limited only when an error event or error result says so (`api_error_status: 429`, or the words "rate limit(ed)", "usage limit" or `429` in the error), or when a run that produced no output exits non-zero with that text on stderr. The cooldown is the rejected window's `resetsAt`, else a reset time parsed from the error text, else the policy default.
+- **Unavailable accounts:** An authentication failure (Claude CLI: "Not logged in", "Please run /login", an expired OAuth token, an invalid API key, or `api_error_status` 401/403; AI SDK: HTTP 401/403) throws `AccountUnavailableError`. The skill runner takes the account out of rotation for `quotaPolicy.unavailableCooldownMs`, records the reason (BOARD.md shows `UNAVAILABLE: <reason>`), and retries on the next account; the reason clears with the cooldown.
 
 ## §5. Driver Implementations (`src/drivers/`)
 

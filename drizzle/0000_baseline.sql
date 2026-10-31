@@ -12,6 +12,7 @@ CREATE TABLE `account_quotas` (
 	`project_share_used` real DEFAULT 0 NOT NULL,
 	`window_tokens_used` integer DEFAULT 0 NOT NULL,
 	`cooldown_until_ms` integer,
+	`unavailable_reason` text,
 	`probed_at_ms` integer,
 	`acquired_at_ms` integer
 );

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "c539edc6-b001-48a8-87e7-bcaee02953af",
+  "id": "e0ad77d8-cbac-4d12-b7fa-e600c0d3cbfa",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "account_quota_windows": {
@@ -87,6 +87,13 @@
         "cooldown_until_ms": {
           "name": "cooldown_until_ms",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "unavailable_reason": {
+          "name": "unavailable_reason",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

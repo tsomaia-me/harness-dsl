@@ -49,6 +49,7 @@ export { HarnessMcpServer, startOrchestrator } from './mcp.js';
 export { claudeCodeHookProtocol, readClaudeCodeTranscriptTokens } from './protocols/claude-code.js';
 export {
   AccountDef,
+  AccountUnavailableError,
   DEFAULT_QUOTA_POLICY,
   PoolDef,
   type PoolReserveConfig,
