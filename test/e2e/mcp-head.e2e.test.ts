@@ -41,7 +41,7 @@ describe('Live E2E 4: Head HTTP MCP Server & Blocker Resolution Round-Trip', () 
           batch: false,
         }),
       );
-      const Haiku = H.model(SdkAcct, 'claude-haiku-4-5-20251001');
+      const Haiku = H.model(SdkAcct, 'claude-haiku-5-5');
 
       const PingSkill = H.skill('ping-advisor')
         .input(z.object({ question: z.string() }))

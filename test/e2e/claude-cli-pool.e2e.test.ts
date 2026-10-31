@@ -56,7 +56,7 @@ describe('Live E2E 1: Claude CLI Pool & Quota Failover', () => {
       const Pool = H.pool('live-subs', [Acct1, Acct2, Acct3])
         .strategy('priority')
         .fallback(FallbackAcct);
-      const Model = H.model(Pool, 'claude-haiku-4-5');
+      const Model = H.model(Pool, 'claude-haiku-5-5');
 
       const MathSkill = H.skill('math-check')
         .input(z.object({ a: z.number(), b: z.number() }))

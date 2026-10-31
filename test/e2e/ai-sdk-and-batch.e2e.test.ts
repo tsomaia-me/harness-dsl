@@ -31,7 +31,7 @@ describe('Live E2E 2: AI SDK Structured Output & Batch Execution', () => {
           batch: false,
         }),
       );
-      const Haiku = H.model(SdkAcct, 'claude-haiku-4-5-20251001', { cachePrefix: true });
+      const Haiku = H.model(SdkAcct, 'claude-haiku-5-5', { cachePrefix: true });
 
       const ClassifySkill = H.skill('classify')
         .input(z.object({ text: z.string() }))
@@ -75,6 +75,7 @@ describe('Live E2E 2: AI SDK Structured Output & Batch Execution', () => {
               type: 'object',
               properties: { ok: { type: 'boolean' } },
               required: ['ok'],
+              additionalProperties: false,
             },
           },
           {
@@ -85,10 +86,11 @@ describe('Live E2E 2: AI SDK Structured Output & Batch Execution', () => {
               type: 'object',
               properties: { ok: { type: 'boolean' } },
               required: ['ok'],
+              additionalProperties: false,
             },
           },
         ],
-        'claude-haiku-4-5-20251001',
+        'claude-haiku-5-5',
         {},
       );
       expect.soft(submitted.batchId.startsWith('msgbatch_')).toBe(true);

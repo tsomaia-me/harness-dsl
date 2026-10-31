@@ -54,8 +54,8 @@ describe('Live E2E 3: Full Coding Loop (Builder -> Stop Hook -> Dispute Arbiter 
           configDir: process.env.CLAUDE_CONFIG_DIR_1 ?? '~/.claude',
         }),
       );
-      const Sonnet = H.model(Acct, 'claude-sonnet-4-6');
-      const Haiku = H.model(Acct, 'claude-haiku-4-5');
+      const Sonnet = H.model(Acct, 'claude-sonnet-5-5');
+      const Haiku = H.model(Acct, 'claude-haiku-5-5');
 
       const RunNodeTest = H.command('node-test')
         .input(z.any())
