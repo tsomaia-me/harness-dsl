@@ -485,6 +485,11 @@ export class FlowEngine {
               outputs.push(parsedOut);
             }
 
+            this.store.recordAccountTokenUsage(
+              resolved.accountId,
+              totalIn + totalOut,
+              resolved.quotaPolicy.tokenBudget,
+            );
             this.store.finishInvocation(invId, {
               status: 'pass',
               inputTokens: totalIn,

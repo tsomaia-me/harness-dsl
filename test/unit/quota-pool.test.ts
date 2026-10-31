@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AccountDef, PoolDef, QuotaExhaustedError } from '../../src/quota.js';
+import { H, z } from '../../src/index.js';
+import { AccountDef, applyQuotaPatch, PoolDef, QuotaExhaustedError } from '../../src/quota.js';
 import { HarnessStore } from '../../src/store.js';
 import type {
   Driver,
@@ -13,6 +14,9 @@ import type {
 } from '../../src/types.js';
 
 const HOURLY = 'acme:hourly';
+const DAY = 24 * 3600_000;
+const MINUTE = 60_000;
+const NOW = Date.UTC(2026, 9, 31, 12);
 const WEEKLY = 'acme:weekly';
 
 function createDummyDriver(opts?: {
@@ -223,22 +227,123 @@ describe('Reactive Account Pool & Quota Engine', () => {
     store.close();
   });
 
-  it('respects reserve configuration and routes to fallback account when pool is exhausted', async () => {
+  it.each([
+    { label: 'uses a non-reserved account before the fallback', subOne: 0.8, fallback: true, expected: 'sub-1' },
+    { label: 'routes to the fallback when only reserved accounts are left', subOne: 0.96, fallback: true, expected: 'api-fallback' },
+    { label: 'uses a reserved account when there is no fallback', subOne: 0.96, fallback: false, expected: 'sub-2' },
+  ])('reserve: $label', async ({ subOne, fallback, expected }) => {
     const store = makeStore();
     const driver = createDummyDriver();
-    const acct1 = new AccountDef('sub-1', driver);
-    const acct2 = new AccountDef('sub-2', driver);
-    const fallbackApi = new AccountDef('api-fallback', driver);
-
-    store.upsertAccountQuota('sub-1', { windows: [{ id: HOURLY, utilization: 0.80 }] });
+    store.upsertAccountQuota('sub-1', { windows: [{ id: HOURLY, utilization: subOne }] });
     store.upsertAccountQuota('sub-2', { windows: [{ id: HOURLY, utilization: 0.20 }] });
+    const reserved = new PoolDef('reserved-pool', [new AccountDef('sub-1', driver), new AccountDef('sub-2', driver)])
+      .strategy('priority')
+      .reserve({ minFreeAccounts: 1, maxBurstUtilization: 0.50 });
+    const pool = fallback ? reserved.fallback(new AccountDef('api-fallback', driver)) : reserved;
 
-    const pool = new PoolDef('reserved-pool', [acct1, acct2])
-      .reserve({ minFreeAccounts: 1, maxBurstUtilization: 0.50 })
-      .fallback(fallbackApi);
+    expect((await pool.acquireAccount(store)).accountId).toBe(expected);
+    store.close();
+  });
 
-    const resolved = await pool.acquireAccount(store);
-    expect.soft(resolved.accountId).toBe('api-fallback');
+  it.each([
+    { label: 'reset early (utilization dropped)', reported: { utilization: 0.01, resetsAtMs: 3 * DAY } },
+    { label: 'rolled over during a run (reset time moved later)', reported: { utilization: 0.65, resetsAtMs: 10 * DAY } },
+  ])('frees the project share when a run reports that the share window $label', async ({ reported }) => {
+    const store = makeStore();
+    const now = Date.now();
+    const acct = new AccountDef('acct-hint', createDummyDriver({ quotaPolicy: { shareResetWindowId: WEEKLY } })).maxQuotaShare(0.5);
+    store.upsertAccountQuota('acct-hint', {
+      windows: [{ id: WEEKLY, utilization: 0.6, resetsAtMs: now + 3 * DAY }],
+      projectShareUsed: 0.5,
+      windowTokensUsed: 2_500_000,
+    });
+
+    applyQuotaPatch(store, 'acct-hint', acct.effectiveQuotaPolicy, {
+      windows: [{ id: WEEKLY, utilization: reported.utilization, resetsAtMs: now + reported.resetsAtMs }],
+    });
+
+    const evaluation = await acct.evaluateEligibility(store, 1, now);
+    expect.soft(store.getAccountQuota('acct-hint')?.windowTokensUsed).toBe(0);
+    expect(evaluation.projectShareUsed).toBe(0);
+    store.close();
+  });
+
+  it('stops blocking on a window without a reset time once it is older than the probe staleness', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.UTC(2026, 9, 31, 12);
+    vi.setSystemTime(start);
+    const store = makeStore();
+    const acct = new AccountDef('acct-stale', createDummyDriver({ quotaPolicy: { probeStalenessMs: 60_000 } }));
+    store.upsertAccountQuota('acct-stale', { windows: [{ id: 'http:ratelimit', utilization: 0.98 }] });
+
+    expect.soft((await acct.evaluateEligibility(store, 1, start + 30_000)).isEligible).toBe(false);
+    expect((await acct.evaluateEligibility(store, 1, start + 61_000)).isEligible).toBe(true);
+    store.close();
+  });
+
+  it.each([
+    {
+      label: 'the active cooldown, not an unrelated window reset',
+      quota: { cooldownUntilMs: NOW + 10 * MINUTE, windows: [{ id: HOURLY, utilization: 0.1, resetsAtMs: NOW + MINUTE }] },
+      expected: NOW + 10 * MINUTE,
+    },
+    {
+      label: 'the latest end among blocking conditions',
+      quota: {
+        cooldownUntilMs: NOW + MINUTE,
+        windows: [{ id: WEEKLY, utilization: 0.99, resetsAtMs: NOW + DAY }],
+      },
+      expected: NOW + DAY,
+    },
+    {
+      label: 'the staleness end of a blocking window without a reset time',
+      quota: { windows: [{ id: WEEKLY, utilization: 0.99 }] },
+      expected: NOW + MINUTE,
+    },
+    {
+      label: 'unknown when the share cap blocks and no share window reset is known',
+      quota: { projectShareUsed: 1 },
+      expected: null,
+    },
+  ])('reports the next available time as $label', async ({ quota, expected }) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    const store = makeStore();
+    const acct = new AccountDef('acct-next', createDummyDriver());
+    store.upsertAccountQuota('acct-next', quota);
+
+    const evaluation = await acct.evaluateEligibility(store, 1, NOW);
+    expect.soft(evaluation.isEligible).toBe(false);
+    expect(evaluation.nextAvailableAtMs).toBe(expected);
+    store.close();
+  });
+
+  it("charges each invocation against its own account policy's token budget", async () => {
+    const store = makeStore();
+    let unbudgeted: AccountDef | undefined;
+    const driver: Driver = {
+      ...createDummyDriver(),
+      async invoke(req) {
+        await unbudgeted!.evaluateEligibility(store, 1, Date.now());
+        return createDummyDriver().invoke(req);
+      },
+    };
+    const budgeted = new AccountDef('shared', driver).quotaPolicy({ tokenBudget: 1_000 });
+    unbudgeted = new AccountDef('shared', driver);
+    store.createRun({ id: 'run-q', flowName: 'f', workDir: store.projectDir, input: {} });
+    const ctx = {
+      runId: 'run-q',
+      iteration: 0,
+      stepName: 'step',
+      projectDir: store.projectDir,
+      workDir: store.projectDir,
+      touchedPaths: [],
+      store,
+      signal: new AbortController().signal,
+    };
+
+    await H.agent('a').model(H.model(budgeted, 'm')).run(H.skill('s').input(z.object({})).output(z.object({}))).execute({}, ctx);
+    expect(store.getAccountQuota('shared')?.projectShareUsed).toBeCloseTo(0.02, 9);
     store.close();
   });
 });

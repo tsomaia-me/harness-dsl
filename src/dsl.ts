@@ -6,7 +6,8 @@ import { z } from 'zod';
 import { drivers } from './drivers/index.js';
 import { DEFAULT_HANDOFF_BUFFER_TOKENS, DEFAULT_MAX_HANDOFFS } from './defaults.js';
 import { claudeCodeHookProtocol } from './protocols/claude-code.js';
-import { AccountDef, PoolDef, RateLimitedError } from './quota.js';
+import { AccountDef, applyQuotaPatch, PoolDef, RateLimitedError } from './quota.js';
+import type { FinishInvocationInput } from './store.js';
 import { LocalRunner, type LocalRunnerOptions, SshRunner, type SshRunnerOptions } from './runner.js';
 import type {
   AccountProvider,
@@ -412,6 +413,18 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
         .filter((s) => s.length > 0)
         .join('\n\n');
 
+      const finishAndCharge = (finish: FinishInvocationInput) => {
+        ctx.store.finishInvocation(invId, finish);
+        const tokens = (finish.inputTokens ?? 0) + (finish.outputTokens ?? 0);
+        if (tokens > 0) {
+          ctx.store.recordAccountTokenUsage(
+            resolvedAccount.accountId,
+            tokens,
+            resolvedAccount.quotaPolicy.tokenBudget,
+          );
+        }
+      };
+
       const hookReceiver = hookProtocol ? ctx.hookReceiver : undefined;
       hookReceiver?.register(invId, {
         runId: ctx.runId,
@@ -447,14 +460,14 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
         });
 
         if (result.quotaHint) {
-          ctx.store.upsertAccountQuota(resolvedAccount.accountId, result.quotaHint);
+          applyQuotaPatch(ctx.store, resolvedAccount.accountId, resolvedAccount.quotaPolicy, result.quotaHint);
         }
 
         if (result.handoffRequested) {
           handoffs += 1;
           if (handoffs > this.agent.maxHandoffsValue) {
             const message = `Skill "${this.skill.name}" on agent "${this.agent.name}" exceeded ${this.agent.maxHandoffsValue} handoffs`;
-            ctx.store.finishInvocation(invId, {
+            finishAndCharge({
               status: 'fail',
               sessionId: result.sessionId,
               ...result.usage,
@@ -462,7 +475,7 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
             });
             throw new HandoffLimitError(message);
           }
-          ctx.store.finishInvocation(invId, {
+          finishAndCharge({
             status: 'pass',
             sessionId: result.sessionId,
             ...result.usage,
@@ -499,7 +512,7 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
           }
         }
 
-        ctx.store.finishInvocation(invId, {
+        finishAndCharge({
           status: 'pass',
           sessionId: result.sessionId,
           ...result.usage,
@@ -515,14 +528,14 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
         if (err instanceof RateLimitedError) {
           const now = Date.now();
           const reported = err.quota.cooldownUntilMs;
-          ctx.store.upsertAccountQuota(resolvedAccount.accountId, {
+          applyQuotaPatch(ctx.store, resolvedAccount.accountId, resolvedAccount.quotaPolicy, {
             ...err.quota,
             cooldownUntilMs:
               typeof reported === 'number' && reported > now
                 ? reported
                 : now + resolvedAccount.quotaPolicy.defaultCooldownMs,
           });
-          ctx.store.finishInvocation(invId, {
+          finishAndCharge({
             status: 'fail',
             errorText: err.message,
           });
@@ -531,7 +544,7 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
         }
 
         if (err instanceof SchemaValidationError) {
-          ctx.store.finishInvocation(invId, {
+          finishAndCharge({
             status: 'fail',
             sessionId: err.driverResult.sessionId,
             ...err.driverResult.usage,
@@ -549,7 +562,7 @@ export class BoundAgentSkill<TInput = unknown, TOutput = unknown, TFlowCtx = any
           continue;
         }
 
-        ctx.store.finishInvocation(invId, {
+        finishAndCharge({
           status: 'fail',
           errorText: err instanceof Error ? err.message : String(err),
         });

@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_QUOTA_POLICY } from '../../src/quota.js';
 import { HarnessStore } from '../../src/store.js';
 
 describe('HarnessStore & Projections', () => {
@@ -45,7 +44,6 @@ describe('HarnessStore & Projections', () => {
     await expect(waitPromise).resolves.toEqual({ answer: 'round down' });
     expect.soft(store.getRun('run-1')?.status).toBe('running');
 
-    store.registerQuotaPolicy('claude-main', { ...DEFAULT_QUOTA_POLICY, tokenBudget: 5_000_000 });
     store.startInvocation({
       id: 'inv-1',
       runId: 'run-1',
@@ -66,9 +64,10 @@ describe('HarnessStore & Projections', () => {
       output: { status: 'READY' },
     });
 
+    store.recordAccountTokenUsage('claude-main', 13_500, 5_000_000);
     const quotaAfterInv = store.getAccountQuota('claude-main');
     expect.soft(quotaAfterInv?.windowTokensUsed).toBe(13500);
-    expect.soft((quotaAfterInv?.projectShareUsed ?? 0) > 0).toBe(true);
+    expect.soft(quotaAfterInv?.projectShareUsed).toBeCloseTo(13_500 / 5_000_000, 12);
 
     store.updateRunProgress('run-1', { status: 'completed', finishedAtMs: Date.now() });
     expect.soft(existsSync(store.telemetryPath)).toBe(true);
@@ -108,7 +107,7 @@ describe('HarnessStore & Projections', () => {
     store.upsertAccountQuota('acct-new', { windows: [{ id: 'acme:rpm', utilization: 0.3 }] });
 
     expect.soft(store.getAccountQuota('acct-new')?.windows).toEqual([
-      { id: 'acme:rpm', utilization: 0.3, resetsAtMs: null },
+      { id: 'acme:rpm', utilization: 0.3, resetsAtMs: null, updatedAtMs: expect.any(Number) },
     ]);
     expect.soft(store.getAccountQuota('legacy-acct')).toBeNull();
     const backup = new Database(path.join(dir, '.harness', 'runtime.db.v0.bak'), { readonly: true });

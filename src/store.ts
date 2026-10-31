@@ -24,7 +24,7 @@ import {
   SCHEMA_VERSION,
   workflowRuns,
 } from './schema.js';
-import type { LessonEntry, QuotaPatch, QuotaPolicy, QuotaWindow } from './types.js';
+import type { LessonEntry, QuotaPatch, QuotaWindow } from './types.js';
 
 export const LessonSchema = z.object({
   id: z.string().min(1),
@@ -68,9 +68,13 @@ export interface FinishInvocationInput {
   readonly errorText?: string;
 }
 
+export interface StoredQuotaWindow extends QuotaWindow {
+  readonly updatedAtMs: number;
+}
+
 export interface AccountQuotaState {
   readonly accountId: string;
-  readonly windows: readonly QuotaWindow[];
+  readonly windows: readonly StoredQuotaWindow[];
   readonly projectShareUsed: number;
   readonly windowTokensUsed: number;
   readonly cooldownUntilMs: number | null;
@@ -161,7 +165,6 @@ export class HarnessStore {
   public readonly db: BetterSQLite3Database;
   private readonly blockerWaiters = new Map<string, (resolution: unknown) => void>();
   private readonly accountShareOverrides = new Map<string, number>();
-  private readonly quotaPolicies = new Map<string, QuotaPolicy>();
   private readonly runContextTokens = new Map<string, number>();
 
   public constructor(projectDir: string) {
@@ -223,10 +226,6 @@ export class HarnessStore {
 
   public getAccountShareOverride(accountId: string): number | undefined {
     return this.accountShareOverrides.get(accountId);
-  }
-
-  public registerQuotaPolicy(accountId: string, policy: QuotaPolicy): void {
-    this.quotaPolicies.set(accountId, policy);
   }
 
   public createRun(input: CreateRunInput): void {
@@ -371,17 +370,12 @@ export class HarnessStore {
       .where(eq(invocations.id, invocationId))
       .run();
 
-    if (existing?.accountId && (inTokens > 0 || outTokens > 0)) {
-      this.recordAccountTokenUsage(existing.accountId, inTokens + outTokens);
-    }
-
     this.projectTelemetry();
   }
 
-  public recordAccountTokenUsage(accountId: string, tokensDelta: number): void {
+  public recordAccountTokenUsage(accountId: string, tokensDelta: number, tokenBudget: number | null): void {
     const tokens = Math.max(0, tokensDelta);
     const existing = this.getAccountQuota(accountId);
-    const tokenBudget = this.quotaPolicies.get(accountId)?.tokenBudget ?? null;
     this.upsertAccountQuota(accountId, {
       windowTokensUsed: (existing?.windowTokensUsed ?? 0) + tokens,
       projectShareUsed:
@@ -415,14 +409,19 @@ export class HarnessStore {
       .map((row) => ({ ...row, windows: this.listQuotaWindows(row.accountId) }));
   }
 
-  private listQuotaWindows(accountId: string): QuotaWindow[] {
+  private listQuotaWindows(accountId: string): StoredQuotaWindow[] {
     return this.db
       .select()
       .from(accountQuotaWindows)
       .where(eq(accountQuotaWindows.accountId, accountId))
       .orderBy(accountQuotaWindows.windowId)
       .all()
-      .map((row) => ({ id: row.windowId, utilization: row.utilization, resetsAtMs: row.resetsAtMs }));
+      .map((row) => ({
+        id: row.windowId,
+        utilization: row.utilization,
+        resetsAtMs: row.resetsAtMs,
+        updatedAtMs: row.updatedAtMs,
+      }));
   }
 
   public upsertAccountQuota(accountId: string, patch: AccountQuotaPatch): void {
@@ -442,12 +441,12 @@ export class HarnessStore {
         });
         const insertWindow = this.db
           .insert(accountQuotaWindows)
-          .values({ accountId, windowId: window.id, ...windowFields });
+          .values({ accountId, windowId: window.id, updatedAtMs: Date.now(), ...windowFields });
         if (Object.keys(windowFields).length > 0) {
           insertWindow
             .onConflictDoUpdate({
               target: [accountQuotaWindows.accountId, accountQuotaWindows.windowId],
-              set: windowFields,
+              set: { ...windowFields, updatedAtMs: Date.now() },
             })
             .run();
         } else {

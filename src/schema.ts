@@ -60,6 +60,7 @@ export const accountQuotaWindows = sqliteTable(
     windowId: text('window_id').notNull(),
     utilization: real('utilization').notNull().default(0),
     resetsAtMs: integer('resets_at_ms'),
+    updatedAtMs: integer('updated_at_ms').notNull(),
   },
   (table) => [primaryKey({ columns: [table.accountId, table.windowId] })],
 );
@@ -134,6 +135,7 @@ CREATE TABLE IF NOT EXISTS account_quota_windows (
   window_id TEXT NOT NULL,
   utilization REAL NOT NULL DEFAULT 0,
   resets_at_ms INTEGER,
+  updated_at_ms INTEGER NOT NULL,
   PRIMARY KEY (account_id, window_id)
 );
 

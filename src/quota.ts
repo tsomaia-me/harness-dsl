@@ -136,20 +136,22 @@ export class AccountDef implements AccountProvider {
     nowMs: number,
   ): Promise<AccountEligibility> {
     const policy = this.effectiveQuotaPolicy;
-    store.registerQuotaPolicy(this.id, policy);
     let state = store.getAccountQuota(this.id);
 
     if (state) {
-      const expiredWindows = state.windows.filter(
+      const resetWindows = state.windows.filter(
         (w) => w.resetsAtMs !== null && nowMs >= w.resetsAtMs,
       );
-      const shareWindowExpired = expiredWindows.some((w) => w.id === policy.shareResetWindowId);
+      const staleWindows = state.windows.filter(
+        (w) => w.resetsAtMs === null && w.utilization > 0 && nowMs - w.updatedAtMs > policy.probeStalenessMs,
+      );
+      const shareWindowReset = resetWindows.some((w) => w.id === policy.shareResetWindowId);
       const cooldownExpired = state.cooldownUntilMs !== null && nowMs >= state.cooldownUntilMs;
-      if (expiredWindows.length > 0 || cooldownExpired) {
+      if (resetWindows.length > 0 || staleWindows.length > 0 || cooldownExpired) {
         store.upsertAccountQuota(this.id, {
-          windows: expiredWindows.map((w) => ({ id: w.id, utilization: 0, resetsAtMs: null })),
+          windows: [...resetWindows, ...staleWindows].map((w) => ({ id: w.id, utilization: 0, resetsAtMs: null })),
           cooldownUntilMs: cooldownExpired ? null : undefined,
-          ...(shareWindowExpired ? { projectShareUsed: 0, windowTokensUsed: 0 } : {}),
+          ...(shareWindowReset ? { projectShareUsed: 0, windowTokensUsed: 0 } : {}),
         });
         state = store.getAccountQuota(this.id);
       }
@@ -159,50 +161,68 @@ export class AccountDef implements AccountProvider {
       !state || state.probedAtMs === null || nowMs - state.probedAtMs > policy.probeStalenessMs;
     if (this.driver.probeQuota && probeIsStale) {
       const probed = await this.driver.probeQuota(this.id);
-      const storedShareWindow = state?.windows.find((w) => w.id === policy.shareResetWindowId);
-      const probedShareWindow = probed.windows?.find((w) => w.id === policy.shareResetWindowId);
-      const shareWindowResetEarly =
-        storedShareWindow !== undefined &&
-        probedShareWindow?.utilization !== undefined &&
-        probedShareWindow.utilization < storedShareWindow.utilization;
-      store.upsertAccountQuota(this.id, {
-        ...probed,
-        probedAtMs: nowMs,
-        ...(shareWindowResetEarly ? { projectShareUsed: 0, windowTokensUsed: 0 } : {}),
-      });
+      applyQuotaPatch(store, this.id, policy, probed);
+      store.upsertAccountQuota(this.id, { probedAtMs: nowMs });
       state = store.getAccountQuota(this.id);
     }
 
     const windows = state?.windows ?? [];
     const projectShareUsed = state?.projectShareUsed ?? 0;
     const cooldownUntilMs = state?.cooldownUntilMs ?? null;
+    const shareWindow = windows.find((w) => w.id === policy.shareResetWindowId);
 
     const overrideShare = store.getAccountShareOverride(this.id);
     const baseAccountCap = overrideShare ?? this.maxQuotaShareValue;
     const effectiveShareCap = Math.min(baseAccountCap, poolMaxQuotaShare);
     const inCooldown = cooldownUntilMs !== null && cooldownUntilMs > nowMs;
     const overShare = projectShareUsed >= effectiveShareCap;
-    const overWindow = windows.some(
+    const blockingWindows = windows.filter(
       (w) => w.utilization >= (policy.thresholds[w.id] ?? policy.defaultThreshold),
     );
+    const isEligible = !inCooldown && !overShare && blockingWindows.length === 0;
 
-    const candidates = [cooldownUntilMs, ...windows.map((w) => w.resetsAtMs)].filter(
-      (v): v is number => v !== null && v > nowMs,
-    );
+    const blockerEnds: (number | null)[] = [
+      ...(inCooldown ? [cooldownUntilMs] : []),
+      ...blockingWindows.map((w) => w.resetsAtMs ?? w.updatedAtMs + policy.probeStalenessMs),
+      ...(overShare ? [shareWindow?.resetsAtMs ?? null] : []),
+    ];
 
     return {
       account: this,
-      isEligible: !inCooldown && !overShare && !overWindow,
+      isEligible,
       effectiveShareCap,
       windows,
       peakUtilization: Math.max(0, ...windows.map((w) => w.utilization)),
-      shareResetsAtMs:
-        windows.find((w) => w.id === policy.shareResetWindowId)?.resetsAtMs ?? null,
+      shareResetsAtMs: shareWindow?.resetsAtMs ?? null,
       projectShareUsed,
       acquiredAtMs: state?.acquiredAtMs ?? 0,
-      nextAvailableAtMs: candidates.length > 0 ? Math.min(...candidates) : null,
+      nextAvailableAtMs:
+        isEligible || blockerEnds.includes(null) ? null : Math.max(...(blockerEnds as number[])),
     };
   }
+}
+
+export function applyQuotaPatch(
+  store: HarnessStore,
+  accountId: string,
+  policy: QuotaPolicy,
+  patch: QuotaPatch,
+): void {
+  const stored = store
+    .getAccountQuota(accountId)
+    ?.windows.find((w) => w.id === policy.shareResetWindowId);
+  const incoming = patch.windows?.find((w) => w.id === policy.shareResetWindowId);
+  const shareWindowReset =
+    stored !== undefined &&
+    incoming !== undefined &&
+    ((incoming.utilization !== undefined && incoming.utilization < stored.utilization) ||
+      (typeof incoming.resetsAtMs === 'number' &&
+        stored.resetsAtMs !== null &&
+        incoming.resetsAtMs > stored.resetsAtMs));
+  store.upsertAccountQuota(accountId, {
+    ...patch,
+    ...(shareWindowReset ? { projectShareUsed: 0, windowTokensUsed: 0 } : {}),
+  });
 }
 
 export class PoolDef implements AccountProvider {
@@ -280,22 +300,29 @@ export class PoolDef implements AccountProvider {
       this.accounts.map((acct) => acct.evaluateEligibility(store, this.maxQuotaShareValue, nowMs)),
     );
 
-    let eligible = evaluations.filter((e) => e.isEligible);
+    const allEligible = evaluations.filter((e) => e.isEligible);
+    const reserved = new Set(
+      this.reserveConfig
+        ? allEligible
+            .filter((e) => e.peakUtilization < this.reserveConfig!.maxBurstUtilization)
+            .sort((a, b) => a.peakUtilization - b.peakUtilization)
+            .slice(0, this.reserveConfig.minFreeAccounts)
+        : [],
+    );
+    let eligible = allEligible.filter((e) => !reserved.has(e));
 
-    if (this.reserveConfig && eligible.length > 0) {
-      const { minFreeAccounts, maxBurstUtilization } = this.reserveConfig;
-      const lowUsageAccounts = eligible.filter((e) => e.peakUtilization < maxBurstUtilization);
-      if (lowUsageAccounts.length > minFreeAccounts) {
-        eligible = lowUsageAccounts;
-      } else if (this.fallbackProvider) {
-        eligible = [];
+    if (eligible.length === 0 && this.fallbackProvider) {
+      try {
+        return await this.fallbackProvider.acquireAccount(store);
+      } catch (err) {
+        if (!(err instanceof QuotaExhaustedError) || reserved.size === 0) throw err;
       }
+    }
+    if (eligible.length === 0) {
+      eligible = [...reserved];
     }
 
     if (eligible.length === 0) {
-      if (this.fallbackProvider) {
-        return this.fallbackProvider.acquireAccount(store);
-      }
       const nextTimes = evaluations
         .map((e) => e.nextAvailableAtMs)
         .filter((v): v is number => v !== null);
