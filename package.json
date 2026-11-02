@@ -5,7 +5,8 @@
   "type": "module",
   "files": [
     "dist",
-    "drizzle"
+    "drizzle",
+    "drizzle-ledger"
   ],
   "publishConfig": {
     "access": "public"
