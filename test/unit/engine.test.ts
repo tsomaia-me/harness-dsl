@@ -340,7 +340,7 @@ describe('the engine over the ledger', () => {
         (round) => round.step('draft', draft, (ctx) => ({ redlines: ctx.unit.attributes.redlines })).halt('counsel', counsel, { ask: () => 'ok?' }),
         { max: 2, until: (ctx) => ctx.steps.counsel.verdict === 'approve', next: (ctx) => ({ returns: ctx.steps.review.returns + 1 }) },
       )
-      .exit('signed', (ctx) => ctx.steps.counsel.verdict === 'approve')
+      .exit('signed', (ctx) => ctx.steps.counsel?.verdict === 'approve')
       .exit('declined');
     const lane = H.lane('contracts', Contract)
       .handler(flow, { exits: { signed: Signed, declined: Declined } })

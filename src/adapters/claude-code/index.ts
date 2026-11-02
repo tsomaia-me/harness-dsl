@@ -66,16 +66,17 @@ export class ClaudeCodeDriver implements ModelDriver<'claude-code'> {
     return account.driver === 'claude-code';
   }
 
-  private inner(credential: EnvRef, resolver: Resolver): ClaudeCliDriver {
-    let inner = this.inners.get(credential.name);
+  private inner(credential: EnvRef | undefined, resolver: Resolver): ClaudeCliDriver {
+    const key = credential?.name ?? '';
+    let inner = this.inners.get(key);
     if (!inner) {
       inner = new ClaudeCliDriver({
-        oauthToken: resolver.env(credential),
+        ...(credential ? { oauthToken: resolver.env(credential) } : {}),
         ...(this.options.claudeBinary ? { claudeBinary: this.options.claudeBinary } : {}),
         ...(this.options.env ? { env: this.options.env } : {}),
         ...(this.options.spawnBridge ? { spawnBridge: this.options.spawnBridge } : {}),
       });
-      this.inners.set(credential.name, inner);
+      this.inners.set(key, inner);
     }
     return inner;
   }
@@ -132,9 +133,9 @@ export class ClaudeCodeDriver implements ModelDriver<'claude-code'> {
 }
 
 export const claudeCode = {
-  /** A Claude subscription signed in through an OAuth token, drawing on the named quota partition. */
-  subscription(name: string, options: { readonly token: EnvRef; readonly quota: QuotaPartition }): Account<'claude-code'> {
-    return { entity: 'account', name, driver: 'claude-code', credential: options.token, quota: options.quota };
+  /** A Claude subscription, through an OAuth token or the CLI's own sign-in when none is given, drawing on the named quota partition. */
+  subscription(name: string, options: { readonly token?: EnvRef; readonly quota: QuotaPartition }): Account<'claude-code'> {
+    return { entity: 'account', name, driver: 'claude-code', ...(options.token ? { credential: options.token } : {}), quota: options.quota };
   },
   model(name: string, options: { readonly id: string }): Model<'claude-code'> {
     return { entity: 'model', name, id: options.id, driver: 'claude-code', batch: false };

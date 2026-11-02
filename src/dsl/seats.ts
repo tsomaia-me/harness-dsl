@@ -29,7 +29,7 @@ export class SeatDef<I = Empty, O = Empty, D extends string = string, B extends 
   public model<D2 extends string>(model: BatchModel<D2>): SeatDef<I, O, D2, true>;
   public model<D2 extends string>(model: Model<D2> | ModelPolicyDef<D2>): SeatDef<I, O, D2, false>;
   public model<D2 extends string>(model: Model<D2> | ModelPolicyDef<D2>): SeatDef<I, O, D2, boolean> {
-    return new SeatDef<I, O, D2, boolean>(this.name, this.roleDef, model);
+    return new SeatDef<I, O, D2, boolean>(this.name, this.roleDef, model, this.poolDef as PoolDef<D2> | undefined);
   }
 
   public pool(pool: PoolDef<D>): SeatDef<I, O, D, B> {

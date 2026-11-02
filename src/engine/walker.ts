@@ -7,7 +7,7 @@ import type { JobDef, JobHandle, JobPoll } from '../dsl/jobs.js';
 import type { RoleDef } from '../dsl/roles.js';
 import type { LaneDef } from '../dsl/lanes.js';
 import type { RunnerPolicyDef } from '../dsl/policies.js';
-import type { RunnerDef } from '../dsl/runners.js';
+import type { RunnerDef, WorkspaceDef } from '../dsl/runners.js';
 import type { ChildResult, UnitView } from '../dsl/views.js';
 import type { Account, KindRef, LedgerEvent, MemoryItem, Metrics, Model, ModelDriver, ModelRequest, ModelResponse, State, StoredFacetValue, UnitRecord } from '../kernel/index.js';
 import { AccountRefusedError } from '../kernel/quota.js';
@@ -66,6 +66,7 @@ class Walker {
   private readonly carries: Record<string, unknown> = {};
   private iteration = 0;
   private now: Date;
+  private workspaceDir: string | undefined;
 
   public constructor(private readonly input: WalkInput) {
     this.now = input.memo.lastAt;
@@ -298,8 +299,25 @@ class Walker {
     return runner;
   }
 
+  /** The attempt's workspace: the first one a step of the flow declares, prepared once per attempt. */
+  private async workspacePath(): Promise<string | undefined> {
+    if (this.workspaceDir !== undefined) return this.workspaceDir || undefined;
+    const find = (nodes: readonly FlowNode[]): WorkspaceDef | undefined => {
+      for (const node of nodes) {
+        if (node.type === 'step' && node.options.workspace) return node.options.workspace;
+        if ((node.type === 'when' || node.type === 'loop') && find(node.nodes)) return find(node.nodes);
+      }
+      return undefined;
+    };
+    const workspace = find(this.input.flow.nodes);
+    this.workspaceDir = workspace ? (await workspace.backend.prepare(this.input.attemptId)).path : '';
+    return this.workspaceDir || undefined;
+  }
+
+  /** A command runs in the attempt's workspace when the flow has one, else where the harness runs. */
   private async exec(runner: RunnerDef, argv: readonly string[]): Promise<CommandResult & { readonly durationMs: number }> {
-    return runner.backend.exec({ argv, env: {} }, new AbortController().signal, this.runtime.resolver);
+    const cwd = await this.workspacePath();
+    return runner.backend.exec({ argv, env: {}, ...(cwd ? { cwd } : {}) }, new AbortController().signal, this.runtime.resolver);
   }
 
   private kindRef(): KindRef {
@@ -407,7 +425,7 @@ class Walker {
       const resume = this.input.resume?.step === addr && this.input.resume.decision !== undefined && recorded?.sessionId
         ? { sessionId: recorded.sessionId, halt: this.input.memo.blocked?.halt ?? '', decision: this.input.resume.decision }
         : undefined;
-      const workspacePath = options.workspace ? (await options.workspace.backend.prepare(this.input.attemptId)).path : undefined;
+      const workspacePath = options.workspace ? await this.workspacePath() : undefined;
       const guard = options.guard && workspacePath ? this.guardFor(seat, driver, options, workspacePath, key, addr) : undefined;
       let call;
       try {

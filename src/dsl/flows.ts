@@ -45,11 +45,22 @@ export interface LoopBounds<In, P, St, St2> {
   readonly span?: LoopSpan;
 }
 
-export type ParallelBranch<In, P, St> =
-  | Executable<void, unknown>
-  | { readonly exec: Executable<unknown, unknown>; readonly input: (ctx: FlowCtx<In, P, St>) => unknown };
+export interface InputBranch<In, P, St, I, O> {
+  readonly exec: Executable<I, O>;
+  readonly input: (ctx: FlowCtx<In, P, St>) => I;
+}
 
-type BranchOutput<B> = B extends { readonly exec: Executable<unknown, infer O> } ? O : B extends Executable<void, infer O> ? O : never;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type ParallelBranch<In, P, St> = Executable<void, unknown> | InputBranch<In, P, St, any, any>;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type BranchOutput<B> = B extends { readonly exec: Executable<any, infer O> } ? O : B extends Executable<void, infer O> ? O : never;
+
+/** Each branch's input function must return what its executable takes. */
+type BranchesFit<In, P, St, B> = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly [K in keyof B]: B[K] extends { readonly exec: Executable<infer I, any>; readonly input: (ctx: FlowCtx<In, P, St>) => infer R } ? ([R] extends [I] ? B[K] : { readonly inputDoesNotFit: I }) : B[K];
+};
 
 type AnyCtx = FlowCtx<unknown, unknown, Record<string, unknown>>;
 
@@ -168,14 +179,14 @@ export class FlowDef<In = unknown, P = void, St = Empty, X extends string = neve
     name: M,
     predicate: (ctx: FlowCtx<In, P, St>) => boolean,
     body: (flow: FlowDef<In, P, St, never, never>) => FlowDef<In, P, St2, X2, N2>,
-  ): FlowDef<In, P, St & Partial<Omit<St2, keyof St>>, X | X2, N | M | N2> {
+  ): FlowDef<In, P, St & Partial<Omit<St2, keyof St>>, X | X2, N | M> {
     const built = body(this.sub(name));
     return this.add({ type: 'when', name, predicate: predicate as (ctx: AnyCtx) => boolean, nodes: built.nodes });
   }
 
   public parallel<M extends string, B extends Readonly<Record<string, ParallelBranch<In, P, St>>>>(
     name: M,
-    branches: B,
+    branches: B & BranchesFit<In, P, St, B>,
   ): FlowDef<In, P, St & { readonly [K in M]: { readonly [K2 in keyof B]: BranchOutput<B[K2]> } }, X, N | M> {
     return this.add({ type: 'parallel', name, branches: branches as Readonly<Record<string, ParallelBranch<unknown, unknown, Record<string, unknown>>>> });
   }
@@ -184,13 +195,13 @@ export class FlowDef<In = unknown, P = void, St = Empty, X extends string = neve
     name: M,
     body: (round: FlowDef<In, P, St, never, never>) => FlowDef<In, P, St2, X2, N2>,
     bounds: LoopBounds<In, P, St, St2>,
-  ): FlowDef<In, P, St2, X | X2, N | M | N2>;
+  ): FlowDef<In, P, St & Partial<Omit<St2, keyof St>>, X | X2, N | M>;
   public loop<M extends string, C, St2, X2 extends string, N2 extends string>(
     name: M,
     carry: { readonly carry: Schema<C>; readonly initial: NoInfer<C> },
     body: (round: FlowDef<In, P, St & { readonly [K in M]: C }, never, never>) => FlowDef<In, P, St2, X2, N2>,
     bounds: LoopBounds<In, P, St, St2> & { readonly next: (ctx: FlowCtx<In, P, St2>) => C },
-  ): FlowDef<In, P, St2, X | X2, N | M | N2>;
+  ): FlowDef<In, P, St & { readonly [K in M]: C } & Partial<Omit<St2, keyof St | M>>, X | X2, N | M>;
   public loop(name: string, carryOrBody: unknown, bodyOrBounds?: unknown, maybeBounds?: unknown): FlowDef<any, any, any, any, any> {
     type Body = (round: FlowDef<In, P, unknown, never, never>) => FlowDef<In, P, unknown, string, string>;
     type Bounds = LoopBounds<unknown, unknown, Record<string, unknown>, Record<string, unknown>>;

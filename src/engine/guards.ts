@@ -21,7 +21,7 @@ export interface GuardContext {
 
 export interface GuardHost {
   takeLease(attemptId: string, resource: string): Promise<boolean>;
-  runCheck(exec: Executable<void, unknown>): Promise<{ readonly ok: boolean; readonly detail: string }>;
+  runCheck(exec: Executable<void, unknown>, cwd: string): Promise<{ readonly ok: boolean; readonly detail: string }>;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -132,7 +132,7 @@ export class GuardServer {
       return { allow: true };
     }
     if (!context.beforeStop) return { allow: true };
-    const check = await this.host.runCheck(context.beforeStop);
+    const check = await this.host.runCheck(context.beforeStop, context.workspacePath);
     if (check.ok) {
       this.blocks.delete(invocation);
       return { allow: true };

@@ -44,6 +44,9 @@ export function job<I, O>(
   return new JobDef<I, O>(name, spec);
 }
 
-export function batch<I, O, D extends string>(name: string, seat: SeatDef<I, O, D, true>): JobDef<readonly I[], readonly O[]> {
-  return new JobDef<readonly I[], readonly O[]>(name, { pollEveryMinutes: 10, batchOf: seat as SeatDef<unknown, unknown, string, true> });
+/** How often a batch is collected when the declaration says nothing. */
+export const DEFAULT_BATCH_POLL_MINUTES = 10;
+
+export function batch<I, O, D extends string>(name: string, seat: SeatDef<I, O, D, true>, options: { readonly pollEveryMinutes?: number } = {}): JobDef<readonly I[], readonly O[]> {
+  return new JobDef<readonly I[], readonly O[]>(name, { pollEveryMinutes: options.pollEveryMinutes ?? DEFAULT_BATCH_POLL_MINUTES, batchOf: seat as SeatDef<unknown, unknown, string, true> });
 }

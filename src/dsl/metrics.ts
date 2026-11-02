@@ -1,20 +1,13 @@
-import type { FacetValue, HaltRef, MetricRef, ResourceRef, SeatRef } from '../kernel/lifecycle.js';
+import type { MetricRef } from '../kernel/lifecycle.js';
+import type { Dimensions } from '../kernel/metrics.js';
 import type { Named } from '../kernel/refs.js';
 import type { Source } from './sources.js';
 
-export interface SampleDimensions {
-  readonly seat?: SeatRef;
-  readonly model?: Named;
-  readonly resource?: ResourceRef;
-  readonly halt?: HaltRef;
-  readonly facets?: readonly FacetValue[];
-}
-
-export interface Sample extends SampleDimensions {
+export interface Sample extends Dimensions {
   readonly hit: boolean;
 }
 
-export interface Amount extends SampleDimensions {
+export interface Amount extends Dimensions {
   readonly amount: number;
 }
 

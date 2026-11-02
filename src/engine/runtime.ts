@@ -148,7 +148,7 @@ export class Runtime {
     await this.triggerEngine.prime();
     if (this.hooksPort !== undefined) {
       this.guards = new GuardServer(
-        { takeLease: (attemptId, resource) => this.takeLease(attemptId, resource), runCheck: (exec) => this.runCheck(exec) },
+        { takeLease: (attemptId, resource) => this.takeLease(attemptId, resource), runCheck: (exec, cwd) => this.runCheck(exec, cwd) },
         typeof this.hooksPort === 'number' ? this.hooksPort : this.resolver.port(this.hooksPort),
       );
       await this.guards.start();
@@ -319,20 +319,20 @@ export class Runtime {
   }
 
   /** Runs a command through its fixed runner: for triggers, custom operations, escalations and stop checks. */
-  public async runExecutable(exec: Executable<unknown, unknown>, input: unknown): Promise<ExecutableResult> {
+  public async runExecutable(exec: Executable<unknown, unknown>, input: unknown, options: { readonly cwd?: string } = {}): Promise<ExecutableResult> {
     if (exec.entity !== 'command') throw new Error(`the engine can run a command here, not a ${exec.entity}`);
     const command = exec as CommandDef<unknown, unknown>;
     const runner = command.runnerChoice;
     if (!runner || runner.entity !== 'runner') throw new Error(`command "${command.name}" has no fixed runner for the engine to use`);
-    const result = await runner.backend.exec({ argv: command.argvOf ? command.argvOf(input) : [], env: {} }, new AbortController().signal, this.resolver);
+    const result = await runner.backend.exec({ argv: command.argvOf ? command.argvOf(input) : [], env: {}, ...(options.cwd ? { cwd: options.cwd } : {}) }, new AbortController().signal, this.resolver);
     const ok = command.acceptedExitCodes.includes(result.exitCode);
     if (ok && command.outputSchema) return { ok, exitCode: result.exitCode, output: command.outputSchema.parse(JSON.parse(result.stdout)) as Json };
     return { ok, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
   }
 
-  private async runCheck(exec: Executable<void, unknown>): Promise<{ readonly ok: boolean; readonly detail: string }> {
+  private async runCheck(exec: Executable<void, unknown>, cwd: string): Promise<{ readonly ok: boolean; readonly detail: string }> {
     try {
-      const result = await this.runExecutable(exec as Executable<unknown, unknown>, undefined);
+      const result = await this.runExecutable(exec as Executable<unknown, unknown>, undefined, { cwd });
       return { ok: result.ok, detail: result.stderr?.trim() || result.stdout?.trim() || `exit ${result.exitCode}` };
     } catch (err) {
       return { ok: false, detail: err instanceof Error ? err.message : String(err) };

@@ -41,7 +41,8 @@ export class AiSdkModelDriver<D extends string> implements ModelDriver<D> {
     return account.driver === this.driver;
   }
 
-  private inner(credential: EnvRef, resolver: Resolver): AiSdkDriver {
+  private inner(credential: EnvRef | undefined, resolver: Resolver): AiSdkDriver {
+    if (!credential) throw new Error(`the ${this.driver} driver needs an account with a credential`);
     let inner = this.inners.get(credential.name);
     if (!inner) {
       inner = new AiSdkDriver({ provider: this.preset, apiKey: resolver.env(credential), ...(this.options.fetch ? { fetch: this.options.fetch } : {}), ...(this.options.baseURL ? { baseURL: this.options.baseURL } : {}) });
@@ -91,7 +92,7 @@ export class AiSdkModelDriver<D extends string> implements ModelDriver<D> {
         first.model,
         {},
       );
-      return { jobId: `${first.account.credential.name}:${batchId}` };
+      return { jobId: `${first.account.credential!.name}:${batchId}` };
     } catch (err) {
       throw refusalOf(err, first.account.name, Date.now(), this.cooldowns()) ?? err;
     }

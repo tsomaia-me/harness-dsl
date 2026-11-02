@@ -160,7 +160,7 @@ describe('startup validation', () => {
     expect(rules(H.harness('h').ledger(fakeLedger()).lanes(lane2).scheduler(H.scheduler('s').standard(lane2)))).toContain(19);
   });
 
-  it('21 and 22: a unit-span loop inside a loop, and a name used twice', () => {
+  it('21 and 4: a unit-span loop inside a loop, and a name used twice', () => {
     const nested = H.flow('f')
       .input(attrs)
       .loop('outer', (outer) => outer.loop('inner', (inner) => inner.step('build', builder, (ctx) => ctx.unit.attributes), { max: 2, span: 'unit' }), { max: 2 })
@@ -169,6 +169,6 @@ describe('startup validation', () => {
     expect(rules(H.harness('h').ledger(fakeLedger()).lanes(lane).scheduler(H.scheduler('s').standard(lane)))).toContain(21);
     const twice = H.flow('f').input(attrs).step('build', builder, (ctx) => ctx.unit.attributes).step('build', builder, (ctx) => ctx.unit.attributes).exit('done');
     const lane2 = H.lane('bugs', Bug).handler(twice, { exits: { done: Done } }).retry({ tries: 0, exhausted: Failed });
-    expect(rules(H.harness('h').ledger(fakeLedger()).lanes(lane2).scheduler(H.scheduler('s').standard(lane2)))).toContain(22);
+    expect(rules(H.harness('h').ledger(fakeLedger()).lanes(lane2).scheduler(H.scheduler('s').standard(lane2)))).toContain(4);
   });
 });

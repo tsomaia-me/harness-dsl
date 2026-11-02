@@ -18,7 +18,7 @@ export class PoolDef<D extends string = string> implements Named {
   }
 
   public accounts<D2 extends string>(...accounts: readonly Account<D2>[]): PoolDef<D2> {
-    return new PoolDef<D2>(this.name, accounts, this.drainPolicy);
+    return new PoolDef<D2>(this.name, accounts, this.drainPolicy, this.fallbackAccount as Account<D2> | undefined);
   }
 
   public drain(drainPolicy: AccountPolicyDef): PoolDef<D> {

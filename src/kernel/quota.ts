@@ -44,7 +44,8 @@ export interface QuotaPartition extends Named {
 export interface Account<D extends string = string> extends Named {
   readonly entity: 'account';
   readonly driver: D;
-  readonly credential: EnvRef;
+  /** Absent for an account the driver's own sign-in serves, such as a CLI the user logged into. */
+  readonly credential?: EnvRef;
   readonly quota: QuotaPartition;
 }
 

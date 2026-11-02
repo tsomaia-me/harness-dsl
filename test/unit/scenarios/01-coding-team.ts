@@ -96,7 +96,7 @@ const buildAudit = H.flow('build-audit')
       next: (ctx) => ({ deficits: ctx.steps.audit.deficits }),
     },
   )
-  .exit('done', (ctx) => ctx.steps.audit.deficits.length === 0)
+  .exit('done', (ctx) => ctx.steps.audit?.deficits.length === 0)
   .exit('incomplete');
 
 const tracker = fakeStore('linear', ['Todo', 'In Progress', 'Blocked', 'Done', 'Canceled'] as const);

@@ -63,16 +63,17 @@ export class GeminiCliModelDriver implements ModelDriver<'gemini-cli'> {
     return account.driver === 'gemini-cli';
   }
 
-  private inner(credential: EnvRef, resolver: Resolver): GeminiCliDriver {
-    let inner = this.inners.get(credential.name);
+  private inner(credential: EnvRef | undefined, resolver: Resolver): GeminiCliDriver {
+    const key = credential?.name ?? '';
+    let inner = this.inners.get(key);
     if (!inner) {
       inner = new GeminiCliDriver({
-        apiKey: resolver.env(credential),
+        ...(credential ? { apiKey: resolver.env(credential) } : {}),
         ...(this.options.geminiBinary ? { geminiBinary: this.options.geminiBinary } : {}),
         ...(this.options.env ? { env: this.options.env } : {}),
         ...(this.options.spawnBridge ? { spawnBridge: this.options.spawnBridge } : {}),
       });
-      this.inners.set(credential.name, inner);
+      this.inners.set(key, inner);
     }
     return inner;
   }
@@ -127,9 +128,9 @@ export class GeminiCliModelDriver implements ModelDriver<'gemini-cli'> {
 }
 
 export const geminiCli = {
-  /** A Gemini API key the CLI signs in with, drawing on the named quota partition. */
-  account(name: string, options: { readonly apiKey: EnvRef; readonly quota: QuotaPartition }): Account<'gemini-cli'> {
-    return { entity: 'account', name, driver: 'gemini-cli', credential: options.apiKey, quota: options.quota };
+  /** A Gemini API key the CLI signs in with, or the CLI's own sign-in when none is given, drawing on the named quota partition. */
+  account(name: string, options: { readonly apiKey?: EnvRef; readonly quota: QuotaPartition }): Account<'gemini-cli'> {
+    return { entity: 'account', name, driver: 'gemini-cli', ...(options.apiKey ? { credential: options.apiKey } : {}), quota: options.quota };
   },
   model(name: string, options: { readonly id: string }): Model<'gemini-cli'> {
     return { entity: 'model', name, id: options.id, driver: 'gemini-cli', batch: false };

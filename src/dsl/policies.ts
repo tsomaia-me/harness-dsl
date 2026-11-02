@@ -1,5 +1,5 @@
-import type { Model, Workspace } from '../kernel/backends.js';
-import type { FacetValue, KindRef, Position, SeatRef } from '../kernel/lifecycle.js';
+import type { Model } from '../kernel/backends.js';
+import type { FacetValue, KindRef, Position, SeatRef, State } from '../kernel/lifecycle.js';
 import type { MemoryItem } from '../kernel/backends.js';
 import type { Metrics } from '../kernel/metrics.js';
 import type { AccountState } from '../kernel/quota.js';
@@ -59,7 +59,7 @@ export interface HaltPolicyCtx<A> {
 
 export interface HaltPolicyDef<A, D> extends PolicyDef<HaltPolicyCtx<A>, D | undefined> {
   readonly policy: 'halt';
-  readonly kind: KindShape<A, never>;
+  readonly kind: KindShape<A, State>;
   readonly halt: HaltDef<string, D>;
 }
 
@@ -82,11 +82,6 @@ export interface AdmitPolicyDef<A = unknown> extends PolicyDef<AdmitCtx<A>, bool
   readonly policy: 'admit';
 }
 
-export interface WorkspacePolicyCtx<A = unknown> {
-  readonly candidates: readonly Workspace[];
-  readonly unit: UnitView<A>;
-}
-
 export const policy = {
   model<D extends string>(
     name: string,
@@ -102,9 +97,9 @@ export const policy = {
   runner<A = unknown>(name: string, candidates: readonly RunnerDef[], choose: (ctx: RunnerPolicyCtx<A>) => RunnerDef): RunnerPolicyDef<A> {
     return { entity: 'policy', policy: 'runner', name, candidates, decide: choose };
   },
-  halt<A, D>(name: string, kind: KindShape<A, never>, halt: HaltDef<string, D>): { decide(decide: (ctx: HaltPolicyCtx<A>) => D | undefined): HaltPolicyDef<A, D> } {
+  halt<A, S extends State, D>(name: string, kind: KindShape<A, S>, halt: HaltDef<string, D>): { decide(decide: (ctx: HaltPolicyCtx<A>) => D | undefined): HaltPolicyDef<A, D> } {
     return {
-      decide: (decide) => ({ entity: 'policy', policy: 'halt', name, kind, halt, decide }),
+      decide: (decide) => ({ entity: 'policy', policy: 'halt', name, kind: kind as KindShape<A, State>, halt, decide }),
     };
   },
   recall(name: string, choose: (ctx: RecallCtx) => readonly MemoryItem[]): RecallPolicyDef {
