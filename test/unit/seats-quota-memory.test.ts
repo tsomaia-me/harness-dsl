@@ -82,38 +82,41 @@ describe('quota partitions', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('folds everyone\'s utilization and cooldowns but only this harness\'s share', async () => {
+  it('folds everyone\'s allowance utilization and cooldowns, treats a saturated throttle as a cooldown, and charges each harness the rise it observed', async () => {
     const x = account('x', partition);
     await partition.append([
       { type: 'consumed', account: 'x', harness: 'alpha', tokens: 600, costUsd: 0.6, at: hours(-2) },
       { type: 'consumed', account: 'x', harness: 'beta', tokens: 400, costUsd: 0.4, at: hours(-1) },
-      { type: 'consumed', account: 'other', harness: 'alpha', tokens: 9_000, costUsd: 9, at: hours(-1) },
       { type: 'windowObserved', account: 'x', harness: 'alpha', window: 'w7d', utilization: 0.8, resetsAt: days(3), at: minutes(-30) },
       { type: 'windowObserved', account: 'x', harness: 'beta', window: 'w5h', utilization: 0.99, resetsAt: minutes(-1), at: hours(-2) },
+      { type: 'windowObserved', account: 'x', harness: 'beta', window: 'requests', kind: 'throttle', utilization: 1, resetsAt: minutes(5), at: minutes(-1) },
       { type: 'cooldown', account: 'x', harness: 'beta', until: minutes(10), reason: 'rate limited', at: minutes(-5) },
     ]);
     const alpha = await foldAccountState(x, 'alpha', 0.5, T);
     expect.soft(alpha).toMatchObject({ utilization: 0.8, shareCap: 0.5, windowResetsAt: days(3), cooldownUntil: minutes(10) });
-    expect.soft(alpha.shareUsed).toBeCloseTo(0.48, 9);
+    expect.soft(alpha.shareUsed).toBeCloseTo(0.8, 9);
     const beta = await foldAccountState(x, 'beta', 1, T);
-    expect.soft(beta.shareUsed).toBeCloseTo(0.32, 9);
+    expect.soft(beta.shareUsed).toBe(0);
     expect.soft(beta.shareCap).toBe(1);
+    const throttled = await foldAccountState(x, 'alpha', 0.5, minutes(1));
+    expect.soft(throttled.cooldownUntil).toEqual(minutes(10));
     const later = await foldAccountState(x, 'alpha', 0.5, minutes(11));
     expect(later.cooldownUntil).toBeUndefined();
   });
 
-  it('counts the share from the last observed reset of the longest window', async () => {
+  it('charges the share from the last observed reset of the longest allowance window, rise by rise', async () => {
     const x = account('x', partition);
     await partition.append([
       { type: 'windowObserved', account: 'x', harness: 'alpha', window: 'w7d', utilization: 0.9, resetsAt: days(-1), at: days(-3) },
-      { type: 'consumed', account: 'x', harness: 'alpha', tokens: 1_000, costUsd: 1, at: days(-2) },
       { type: 'windowObserved', account: 'x', harness: 'alpha', window: 'w7d', utilization: 0.5, resetsAt: days(6), at: hours(-1) },
-      { type: 'consumed', account: 'x', harness: 'alpha', tokens: 100, costUsd: 0.1, at: minutes(-30) },
-      { type: 'consumed', account: 'x', harness: 'beta', tokens: 100, costUsd: 0.1, at: minutes(-20) },
+      { type: 'windowObserved', account: 'x', harness: 'beta', window: 'w7d', utilization: 0.7, resetsAt: days(6), at: minutes(-40) },
+      { type: 'windowObserved', account: 'x', harness: 'alpha', window: 'w7d', utilization: 0.75, resetsAt: days(6), at: minutes(-30) },
+      { type: 'windowObserved', account: 'x', harness: 'beta', window: 'w7d', utilization: 0.7, resetsAt: days(6), at: minutes(-20) },
     ]);
     const alpha = await foldAccountState(x, 'alpha', 1, T);
-    expect.soft(alpha.utilization).toBe(0.5);
-    expect(alpha.shareUsed).toBeCloseTo(0.25, 9);
+    expect.soft(alpha.utilization).toBe(0.7);
+    expect.soft(alpha.shareUsed).toBeCloseTo(0.55, 9);
+    expect((await foldAccountState(x, 'beta', 1, T)).shareUsed).toBeCloseTo(0.2, 9);
   });
 
   it('admits one live process per harness name and lets a dead holder be taken over', async () => {

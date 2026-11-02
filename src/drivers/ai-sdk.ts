@@ -28,7 +28,8 @@ export interface ProviderConnection {
 export interface ProviderPreset {
   readonly name: string;
   readonly apiKeyEnv?: string;
-  createModel(modelId: string, connection: ProviderConnection): LanguageModel;
+  /** May load the provider's SDK on first use. */
+  createModel(modelId: string, connection: ProviderConnection): LanguageModel | Promise<LanguageModel>;
   mapModelOptions?(options: Record<string, unknown>): ProviderOptions | undefined;
   readonly rateLimits?: RateLimitAdapter;
   readonly pricing?: PricingAdapter;
@@ -118,7 +119,7 @@ export class AiSdkDriver implements Driver {
   }
 
   public async invoke(req: DriverInvokeRequest): Promise<DriverInvokeResult> {
-    const model = this.preset.createModel(req.modelId, this.connection());
+    const model = await this.preset.createModel(req.modelId, this.connection());
     const providerOptions = this.preset.mapModelOptions?.(req.modelOptions);
 
     try {

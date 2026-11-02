@@ -100,7 +100,7 @@ describe('the claude-code adapter', () => {
     expect.soft(schema.properties.recorded.anyOf[0].type).toBe('array');
     expect.soft(response).toMatchObject({ output: { verdict: 'ship' }, costUsd: 0, tokens: 15, sessionId: flag(call!.args, '--session-id') });
     expect.soft(response.recorded).toEqual([{ journal: 'lessons', text: 'tests first', when: { kinds: [], roles: [], resources: [], facets: [] } }]);
-    expect.soft(response.windows).toEqual([{ window: 'anthropic:5h', utilization: 0.42, resetsAt: new Date(1793455200_000) }]);
+    expect.soft(response.windows).toEqual([{ window: 'anthropic:5h', kind: 'allowance', utilization: 0.42, resetsAt: new Date(1793455200_000) }]);
 
     const again = await driver.invoke(request(account, sonnet.id), resolver);
     expect.soft(again.sessionId).toBe(response.sessionId);
@@ -189,7 +189,7 @@ describe('the anthropic adapter', () => {
     expect.soft(response.output).toEqual({ verdict: 'ship' });
     expect.soft(response.tokens).toBe(1_200);
     expect.soft(response.costUsd).toBeGreaterThan(0);
-    expect(response.windows).toEqual([{ window: 'anthropic:5h', utilization: 0.42, resetsAt: new Date(1793455200_000) }]);
+    expect(response.windows).toEqual([{ window: 'anthropic:5h', kind: 'allowance', utilization: 0.42, resetsAt: new Date(1793455200_000) }]);
   });
 
   it('turns a 429 into an account refusal that carries the retry-after cooldown', async () => {

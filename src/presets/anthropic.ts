@@ -1,4 +1,3 @@
-import { createAnthropic } from '@ai-sdk/anthropic';
 import { anthropicBatchAdapter } from '../batch/anthropic.js';
 import type { ProviderPreset } from '../drivers/ai-sdk.js';
 import { anthropicPricing } from '../pricing/anthropic.js';
@@ -7,7 +6,7 @@ import { anthropicRateLimits } from '../rate-limits/anthropic.js';
 export const anthropicPreset: ProviderPreset = {
   name: 'anthropic',
   apiKeyEnv: 'ANTHROPIC_API_KEY',
-  createModel: (modelId, connection) => createAnthropic(connection)(modelId),
+  createModel: async (modelId, connection) => (await import('@ai-sdk/anthropic')).createAnthropic(connection)(modelId),
   mapModelOptions: ({ cachePrefix, thinkingBudget, effort, ...rest }) => {
     const anthropic = {
       ...rest,

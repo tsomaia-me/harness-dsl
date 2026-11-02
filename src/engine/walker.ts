@@ -350,7 +350,7 @@ class Walker {
     const at = this.runtime.now();
     return [
       { type: 'consumed', tokens: response.tokens, costUsd: response.costUsd ?? 0, at },
-      ...(response.windows ?? []).map((window) => ({ type: 'windowObserved' as const, window: window.window, utilization: window.utilization, resetsAt: window.resetsAt, at })),
+      ...(response.windows ?? []).map((window) => ({ type: 'windowObserved' as const, window: window.window, ...(window.kind ? { kind: window.kind } : {}), utilization: window.utilization, resetsAt: window.resetsAt, at })),
       ...(response.cooldownUntil ? [{ type: 'cooldown' as const, until: response.cooldownUntil, reason: 'reported by the driver', at }] : []),
     ];
   }
@@ -379,7 +379,7 @@ class Walker {
         }
         await this.runtime.quotaEvents(account, [
           { type: 'cooldown', until: err.until, reason: `${err.refusal}: ${err.message}`, at },
-          ...err.windows.map((window) => ({ type: 'windowObserved' as const, window: window.window, utilization: window.utilization, resetsAt: window.resetsAt, at })),
+          ...err.windows.map((window) => ({ type: 'windowObserved' as const, window: window.window, ...(window.kind ? { kind: window.kind } : {}), utilization: window.utilization, resetsAt: window.resetsAt, at })),
         ]);
         await this.append([{ type: 'invocation', attemptId: this.input.attemptId, step: addr, number, executable: seat.name, seat: seat.name, model: model.name, account: account.name, viaJob, ok: false, costUsd: 0, durationMs: Math.max(0, at.getTime() - startedAt.getTime()), at }]);
         excluded.add(account.name);
@@ -549,7 +549,7 @@ class Walker {
       if (account) {
         await this.runtime.quotaEvents(account, [
           { type: 'consumed', tokens, costUsd, at },
-          ...responses.flatMap((response) => (response.windows ?? []).map((window) => ({ type: 'windowObserved' as const, window: window.window, utilization: window.utilization, resetsAt: window.resetsAt, at }))),
+          ...responses.flatMap((response) => (response.windows ?? []).map((window) => ({ type: 'windowObserved' as const, window: window.window, ...(window.kind ? { kind: window.kind } : {}), utilization: window.utilization, resetsAt: window.resetsAt, at }))),
         ]);
       }
       await this.append([{ type: 'invocation', attemptId: this.input.attemptId, step: addr, number: submitted.number + 1, executable: job.name, seat: seat.name, model: model.name, ...(submitted.account ? { account: submitted.account } : {}), viaJob: true, ok: true, costUsd, tokens, durationMs: 0, at }]);

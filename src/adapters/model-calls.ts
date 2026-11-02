@@ -3,7 +3,11 @@ import type { ModelRequest, ModelResponse, StoredScope } from '../kernel/backend
 import { AccountRefusedError, type ObservedWindow } from '../kernel/quota.js';
 import type { Json, JsonObject } from '../kernel/refs.js';
 import { AccountUnavailableError, RateLimitedError } from '../drivers/errors.js';
+import { ANTHROPIC_5H_WINDOW, ANTHROPIC_7D_WINDOW } from '../rate-limits/anthropic.js';
 import type { QuotaPatch, TokenUsage } from '../types.js';
+
+/** The windows that are usage allowances; every other reported window is a per-minute throttle (plan W3). */
+export const ALLOWANCE_WINDOWS: ReadonlySet<string> = new Set([ANTHROPIC_5H_WINDOW, ANTHROPIC_7D_WINDOW]);
 
 /** How long an account rests after a rate limit that names no reset, and after a failed login. */
 export const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 60_000;
@@ -79,7 +83,7 @@ export function tokensOf(usage: TokenUsage): number {
 export function windowsOf(patch: QuotaPatch | undefined): ObservedWindow[] {
   return (patch?.windows ?? []).flatMap((window) =>
     typeof window.utilization === 'number'
-      ? [{ window: window.id, utilization: window.utilization, resetsAt: typeof window.resetsAtMs === 'number' ? new Date(window.resetsAtMs) : null }]
+      ? [{ window: window.id, kind: ALLOWANCE_WINDOWS.has(window.id) ? ('allowance' as const) : ('throttle' as const), utilization: window.utilization, resetsAt: typeof window.resetsAtMs === 'number' ? new Date(window.resetsAtMs) : null }]
       : [],
   );
 }

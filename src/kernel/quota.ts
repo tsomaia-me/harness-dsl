@@ -3,10 +3,15 @@ import type { EnvRef, Named } from './refs.js';
 export type QuotaEvent =
   | { readonly type: 'consumed'; readonly account: string; readonly harness: string; readonly tokens: number; readonly costUsd: number; readonly at: Date }
   | { readonly type: 'cooldown'; readonly account: string; readonly harness: string; readonly until: Date; readonly reason: string; readonly at: Date }
-  | { readonly type: 'windowObserved'; readonly account: string; readonly harness: string; readonly window: string; readonly utilization: number; readonly resetsAt: Date | null; readonly at: Date };
+  | { readonly type: 'windowObserved'; readonly account: string; readonly harness: string; readonly window: string; readonly kind?: WindowKind; readonly utilization: number; readonly resetsAt: Date | null; readonly at: Date };
+
+/** An `allowance` window is a usage cap (5h, 7d, daily); a `throttle` window is a per-minute rate limit. */
+export type WindowKind = 'allowance' | 'throttle';
 
 export interface ObservedWindow {
   readonly window: string;
+  /** Default `allowance`. */
+  readonly kind?: WindowKind;
   readonly utilization: number;
   readonly resetsAt: Date | null;
 }
