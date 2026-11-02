@@ -5,13 +5,10 @@ export interface OpenRouterBatchOptions {
   readonly pricing: PricingAdapter;
   readonly baseURL?: string;
   readonly fetch?: typeof fetch;
-  /** The share of the standard price a batch request costs; OpenRouter's typical rate is 0.5. */
-  readonly discount?: number;
 }
 
 export const OPENROUTER_BATCH_DEFAULTS = {
   baseURL: 'https://openrouter.ai/api/v1',
-  discount: 0.5,
   completionWindow: '24h',
 } as const;
 
@@ -27,11 +24,18 @@ function parseContent(content: unknown): unknown {
   }
 }
 
-/** OpenRouter's batch API: inline chat-completion requests, polled by id, results inline when complete. */
+function round(usd: number): number {
+  return Number(usd.toFixed(6));
+}
+
+/**
+ * OpenRouter's batch API: inline chat-completion requests, polled by id, results inline when complete.
+ * The batch reports one `usage.cost` for all of its items; each item is charged its share by tokens.
+ * The list price stays the equivalent. Without a reported cost, the list price is the charge.
+ */
 export function openrouterBatchAdapter(opts: OpenRouterBatchOptions): BatchAdapter {
   const fetchFn = opts.fetch ?? globalThis.fetch;
   const base = (opts.baseURL ?? OPENROUTER_BATCH_DEFAULTS.baseURL).replace(/\/$/, '');
-  const discount = opts.discount ?? OPENROUTER_BATCH_DEFAULTS.discount;
   const headers = () => ({ authorization: `Bearer ${opts.apiKey()}`, 'content-type': 'application/json' });
   const pricingByBatch = new Map<string, PricingAdapter>();
 
@@ -63,24 +67,30 @@ export function openrouterBatchAdapter(opts: OpenRouterBatchOptions): BatchAdapt
     poll: async (batchId) => {
       const res = await fetchFn(`${base}/batches/${batchId}`, { headers: headers() });
       if (!res.ok) throw new Error(`OpenRouter batch poll failed (${res.status})`);
-      const data = (await res.json()) as { status: string; results?: readonly Record<string, any>[] | null };
+      const data = (await res.json()) as { status: string; usage?: { cost?: number }; results?: readonly Record<string, any>[] | null };
       if (FAILED.has(data.status)) return { status: 'failed' };
       if (!FINISHED.has(data.status) || !data.results) return { status: 'running' };
       const pricing = pricingByBatch.get(batchId) ?? opts.pricing;
       pricingByBatch.delete(batchId);
-      const results: BatchItemResult[] = data.results.map((entry) => {
+      const entries = data.results.map((entry) => {
         const body = entry.response?.body as Record<string, any> | undefined;
         const usage = body?.usage ?? {};
         const cachedInputTokens = Number(usage.prompt_tokens_details?.cached_tokens ?? 0);
         const counts = { inputTokens: Number(usage.prompt_tokens ?? 0), cachedInputTokens, cacheWriteTokens: 0, outputTokens: Number(usage.completion_tokens ?? 0) };
         const ok = entry.error == null && body !== undefined;
-        const fullCost = ok && typeof body?.model === 'string' ? pricing.estimate(body.model, counts, Date.now()) : ok ? pricing.estimate(String(entry.response?.body?.model ?? ''), counts, Date.now()) : 0;
+        return { entry, body, counts, ok, tokens: ok ? counts.inputTokens + counts.outputTokens : 0 };
+      });
+      const reportedCost = typeof data.usage?.cost === 'number' ? data.usage.cost : undefined;
+      const chargedTokens = entries.reduce((sum, item) => sum + item.tokens, 0);
+      const results: BatchItemResult[] = entries.map(({ entry, body, counts, ok, tokens }) => {
+        const listPrice = ok ? pricing.estimate(String(body?.model ?? ''), counts, Date.now()) : 0;
+        const charged = !ok ? 0 : reportedCost !== undefined ? round(chargedTokens === 0 ? 0 : (reportedCost * tokens) / chargedTokens) : listPrice;
         return {
           customId: String(entry.custom_id),
           ok,
           structuredOutput: ok ? parseContent(body?.choices?.[0]?.message?.content) : undefined,
           error: ok ? undefined : `${entry.error?.type ?? 'error'}: ${entry.error?.message ?? 'Batch item failed'}`,
-          usage: { ...counts, actualCostUsd: fullCost === null ? null : Number((fullCost * discount).toFixed(6)), equivalentCostUsd: fullCost },
+          usage: { ...counts, actualCostUsd: charged, equivalentCostUsd: listPrice },
         };
       });
       return { status: 'completed', results };

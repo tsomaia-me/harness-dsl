@@ -523,6 +523,38 @@ describe('the engine after the cold review', () => {
     expect(counts).toEqual([1, 1, 1]);
   });
 
+  it('a finished session that still carries the decided halt is stale: the call is made again with the decision', async () => {
+    const halting: ModelResponse = { output: null, costUsd: 0, tokens: 1, halt: { halt: 'approval', ask: 'ship?' } };
+    let powerOff = false;
+    let resumed = 0;
+    const driver = new ScriptedDriver((request) => {
+      if (!request.resume) return halting;
+      resumed += 1;
+      if (resumed === 1) powerOff = true;
+      return { output: { verdict: `after ${request.resume.halt}` }, costUsd: 0, tokens: 1 };
+    });
+    const recovering: ModelDriver<'test'> = { ...driver, invoke: (request) => driver.invoke(request), session: async () => ({ status: 'finished', response: halting }), serves: () => true };
+    const cutting = () => {
+      if (powerOff) throw new Error('power off');
+      return clock;
+    };
+    const lane = laneOf(H.flow('f').input(Task.attributeSchema!).step('work', seatOf(), (ctx) => ({ title: ctx.unit.attributes.title }), { halts: [approval] }).exit('done'));
+    const harness = H.harness('stale').ledger(ledger).lanes(lane).scheduler(H.scheduler('s').standard(lane)).clients(fakeClient('owner', [H.ops.resolve(approval)]));
+    const first = await started(harness, recovering, { claimTtlMs: 150, now: cutting });
+    const unit = (await first.createUnit(lane, { title: 's' }, { source: 'test' }))!;
+    expect.soft(await first.startAttempt(unit)).toMatchObject({ kind: 'blocked', on: 'decision', halt: approval });
+    await expect(first.resolveHalt(unit, { approved: true }, 'owner')).rejects.toThrow(/power off/);
+    powerOff = false;
+    await first.stop();
+    runtimes.pop();
+    const second = await started(harness, recovering);
+    expect.soft((await second.find(unit))?.unit).toMatchObject({ state: 'Done', position: 'terminal' });
+    expect.soft(driver.requests.map((request) => request.resume)).toEqual([undefined, { halt: 'approval', decision: { approved: true } }, { halt: 'approval', decision: { approved: true } }]);
+    expect.soft(await eventsOf(ledger, 'attemptInterrupted')).toHaveLength(1);
+    const outputs = (await eventsOf(ledger, 'stepEnded')) as Event<'stepEnded'>[];
+    expect(outputs.map((event) => event.output)).toEqual([{ verdict: 'after approval' }]);
+  });
+
   it('releases the workspace when the attempt ends and refuses to continue a command whose output it cannot fabricate', async () => {
     const released: string[] = [];
     const workspace = defineWorkspace('ws', { prepare: async (attemptId) => ({ path: path.join(dir, attemptId) }), release: async (attemptId) => void released.push(attemptId) });

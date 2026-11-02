@@ -8,7 +8,7 @@ import type { JournalDef, MemoryDraft } from '../dsl/memory.js';
 import type { ModelPolicyDef } from '../dsl/policies.js';
 import type { UnitView } from '../dsl/views.js';
 import { validate, type Problem } from '../dsl/validate.js';
-import type { Client, ControlApi, KindRef, Ledger, LedgerEvent, MemoryItem, Metrics, Model, ModelDriver, ModelResponse, Resolver, SequencedEvent, State, UnitRecord, Window } from '../kernel/index.js';
+import type { Client, ControlApi, KindRef, LeaseMode, Ledger, LedgerEvent, MemoryItem, Metrics, Model, ModelDriver, ModelResponse, Resolver, SequencedEvent, State, UnitRecord, Window } from '../kernel/index.js';
 import type { Account, AccountState, QuotaEvent, QuotaPartition } from '../kernel/quota.js';
 import type { Json, JsonObject, PortRef } from '../kernel/refs.js';
 import { flowVersion, nodeAt } from './address.js';
@@ -125,8 +125,8 @@ export class Runtime {
   private readonly partitions: readonly QuotaPartition[];
   private readonly paused = new Set<string>();
   private readonly listeners = new Set<(event: SequencedEvent) => void>();
-  /** Per attempt, the resources its leases hold; folded from `leaseTaken` and `leaseReleased`. */
-  private readonly leasesHeld = new Map<string, Set<string>>();
+  /** Per attempt, the mode its lease on each resource holds; folded from `leaseTaken` and `leaseReleased`. */
+  private readonly leasesHeld = new Map<string, Map<string, LeaseMode>>();
   /** Per unit, the halt clocks armed for its open attempt. */
   private readonly clocks = new Map<string, Set<string>>();
   /** Per unit, the `resume:` timer armed for its blocked attempt. */
@@ -376,8 +376,8 @@ export class Runtime {
         return;
       }
       case 'leaseTaken': {
-        const held = this.leasesHeld.get(event.attemptId) ?? new Set<string>();
-        held.add(event.resource);
+        const held = this.leasesHeld.get(event.attemptId) ?? new Map<string, LeaseMode>();
+        held.set(event.resource, event.mode);
         this.leasesHeld.set(event.attemptId, held);
         return;
       }
@@ -729,8 +729,9 @@ export class Runtime {
     this.guards?.unregister(invocation);
   }
 
+  /** A guarded write needs the area exclusively; a shared lane lease on it is upgraded when nobody else holds it. */
   private async takeLease(attemptId: string, resource: string): Promise<boolean> {
-    if (this.leasesHeld.get(attemptId)?.has(resource)) return true;
+    if (this.leasesHeld.get(attemptId)?.get(resource) === 'exclusive') return true;
     if (!(await this.ledger.takeLease(attemptId, resource, 'exclusive'))) return false;
     await this.append([{ type: 'leaseTaken', attemptId, resource, mode: 'exclusive', waitedMs: 0, at: this.now() }]);
     return true;
@@ -739,7 +740,7 @@ export class Runtime {
   /** The events that close an attempt's leases, clocks and resume timer; they go in front of its `attemptEnded`. */
   private closingEvents(unitId: string, attemptId: string): LedgerEvent[] {
     const at = this.now();
-    const leases: LedgerEvent[] = [...(this.leasesHeld.get(attemptId) ?? [])].map((resource) => ({ type: 'leaseReleased', attemptId, resource, at }));
+    const leases: LedgerEvent[] = [...(this.leasesHeld.get(attemptId)?.keys() ?? [])].map((resource) => ({ type: 'leaseReleased', attemptId, resource, at }));
     const resume = this.resumeTimers.get(unitId);
     return [...leases, ...this.disarmEvents(unitId), ...(resume === undefined ? [] : [{ type: 'timerCleared' as const, timerId: resume, reason: 'disarmed' as const, at }])];
   }

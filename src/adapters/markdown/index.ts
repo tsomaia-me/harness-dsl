@@ -56,6 +56,7 @@ export class MarkdownTelemetry implements Observer {
   private readonly seats = new Map<string, Set<string>>();
   private invocations = 0;
   private costUsd = 0;
+  private equivalentUsd = 0;
   private tokens = 0;
 
   public constructor(name: string, options: { readonly path: string }) {
@@ -69,6 +70,7 @@ export class MarkdownTelemetry implements Observer {
     if (event.type === 'invocation') {
       this.invocations += 1;
       this.costUsd += event.costUsd;
+      this.equivalentUsd += event.equivalentUsd ?? event.costUsd;
       this.tokens += event.tokens ?? 0;
       if (event.seat && event.model) this.seats.set(event.seat, new Set([...(this.seats.get(event.seat) ?? []), event.model]));
     }
@@ -111,7 +113,7 @@ export class MarkdownTelemetry implements Observer {
         '',
         '## Cost',
         '',
-        `- Total: $${this.costUsd.toFixed(2)} over ${this.invocations} invocations and ${this.tokens} tokens`,
+        `- Total: $${this.costUsd.toFixed(2)} charged over ${this.invocations} invocations and ${this.tokens} tokens; $${this.equivalentUsd.toFixed(2)} at list price`,
         '',
       ].join('\n'),
     );

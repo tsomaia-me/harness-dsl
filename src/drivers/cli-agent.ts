@@ -1,11 +1,11 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { InactivityTimeoutError, killProcessGroupAndTree } from '../runner.js';
-import type { Driver, DriverInvokeRequest, DriverInvokeResult, HookSubscriptions, PricingAdapter, QuotaPatch, QuotaPolicy, TokenUsage } from '../types.js';
+import type { Driver, DriverInvokeRequest, DriverInvokeResult, HookSubscriptions, PricingAdapter, QuotaPatch, TokenUsage } from '../types.js';
 import { AccountUnavailableError, RateLimitedError } from './errors.js';
 
 export interface CliSpawnBridge {
-  (args: readonly string[], env: Record<string, string>, cwd: string, onLine: (line: string) => void, inactivityTimeoutMs: number, signal: AbortSignal): Promise<{ exitCode: number; stderr: string }>;
+  (args: readonly string[], env: Record<string, string>, cwd: string, onLine: (line: string) => void, inactivityTimeoutMs: number, signal: AbortSignal, onSpawn?: (pid: number) => void): Promise<{ exitCode: number; stderr: string }>;
 }
 
 /** What one agent run accumulates while its output streams by; the adapter fills it line by line. */
@@ -35,7 +35,6 @@ export interface CliAgentAdapter {
   readonly name: string;
   readonly binary: string;
   readonly pricing: PricingAdapter;
-  readonly quotaPolicy?: Partial<QuotaPolicy>;
   /** Variables stripped from the inherited environment when the adapter sets its own credential. */
   readonly stripInheritedEnv?: readonly string[];
   /** A prepaid plan: calls cost nothing more; the reported or estimated price is the equivalent. */
@@ -46,8 +45,8 @@ export interface CliAgentAdapter {
   event(event: Record<string, any>, state: CliAgentState, req: DriverInvokeRequest): void;
   /** The run ended; read stderr for what the stream did not say. */
   ended?(exitCode: number, stderr: string, state: CliAgentState): void;
-  /** Writes the hook settings the agent reads for this run and says where. */
-  placeHookSettings?(req: DriverInvokeRequest, endpoint: string, subscriptions: HookSubscriptions): PlacedSettings;
+  /** Writes the hook settings the agent reads for this run and says where; may wait for another run's settings to clear. */
+  placeHookSettings?(req: DriverInvokeRequest, endpoint: string, subscriptions: HookSubscriptions): PlacedSettings | Promise<PlacedSettings>;
 }
 
 export interface CliAgentDriverOptions {
@@ -74,7 +73,6 @@ function parseLooseJson(text: string): unknown {
 export class CliAgentDriver implements Driver {
   public readonly kind: string;
   public readonly binary: string;
-  public readonly quotaPolicy: Partial<QuotaPolicy> | undefined;
   private readonly extraEnv: Record<string, string>;
   private readonly spawnBridge: CliSpawnBridge | undefined;
 
@@ -84,7 +82,6 @@ export class CliAgentDriver implements Driver {
   ) {
     this.kind = adapter.name;
     this.binary = options.binary ?? adapter.binary;
-    this.quotaPolicy = adapter.quotaPolicy;
     this.extraEnv = options.env ?? {};
     this.spawnBridge = options.spawnBridge;
   }
@@ -94,7 +91,7 @@ export class CliAgentDriver implements Driver {
     const subscriptions = req.hookSubscriptions;
     const placed =
       req.hookServerUrl && req.invocationId && subscriptions && (subscriptions.preToolIntents.length > 0 || subscriptions.stop) && this.adapter.placeHookSettings
-        ? this.adapter.placeHookSettings(req, req.hookServerUrl, subscriptions)
+        ? await this.adapter.placeHookSettings(req, req.hookServerUrl, subscriptions)
         : undefined;
     const state: CliAgentState = {
       inputTokens: 0,
@@ -123,7 +120,7 @@ export class CliAgentDriver implements Driver {
     try {
       const bridge = this.spawnBridge ?? this.defaultSpawnBridge.bind(this);
       const env = { ...this.extraEnv, ...this.adapter.env(req) };
-      const { exitCode, stderr } = await bridge(this.adapter.args(req, sessionId, placed?.path), env, req.workDir, onLine, req.inactivityTimeoutMs, req.signal);
+      const { exitCode, stderr } = await bridge(this.adapter.args(req, sessionId, placed?.path), env, req.workDir, onLine, req.inactivityTimeoutMs, req.signal, req.onSpawn);
       this.adapter.ended?.(exitCode, stderr, state);
       if (state.authFailed) throw new AccountUnavailableError(req.accountId, (state.errorText || stderr).trim());
       if (state.rateLimited) {
@@ -150,11 +147,12 @@ export class CliAgentDriver implements Driver {
     }
   }
 
-  private defaultSpawnBridge(args: readonly string[], env: Record<string, string>, cwd: string, onLine: (line: string) => void, inactivityTimeoutMs: number, signal: AbortSignal): Promise<{ exitCode: number; stderr: string }> {
+  private defaultSpawnBridge(args: readonly string[], env: Record<string, string>, cwd: string, onLine: (line: string) => void, inactivityTimeoutMs: number, signal: AbortSignal, onSpawn?: (pid: number) => void): Promise<{ exitCode: number; stderr: string }> {
     return new Promise((resolve, reject) => {
       const baseEnv = { ...process.env };
       for (const name of this.adapter.stripInheritedEnv ?? []) if (!(name in this.extraEnv)) delete baseEnv[name];
       const child = spawn(this.binary, args, { cwd, env: { ...baseEnv, ...env }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      if (child.pid !== undefined) onSpawn?.(child.pid);
       let buffer = '';
       let stderr = '';
       let settled = false;

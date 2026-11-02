@@ -5,6 +5,7 @@ import { googlePricing } from '../pricing/google.js';
 import { openaiPricing } from '../pricing/openai.js';
 import { ietfRateLimits } from '../rate-limits/ietf.js';
 import { openaiRateLimits } from '../rate-limits/openai.js';
+import { openaiPreset } from './openai.js';
 import { composeRateLimits } from '../rate-limits/compose.js';
 import type { PricingAdapter } from '../types.js';
 
@@ -26,10 +27,7 @@ export const openrouterPreset: ProviderPreset = {
   name: 'openrouter',
   apiKeyEnv: 'OPEN_ROUTER_API_KEY',
   createModel: async (modelId, connection) => (await import('@ai-sdk/openai')).createOpenAI({ ...connection, baseURL: connection.baseURL ?? OPENROUTER_BASE_URL })(modelId),
-  mapModelOptions: ({ cachePrefix: _cachePrefix, thinkingBudget: _thinkingBudget, effort, ...rest }) => {
-    const openai = { ...rest, ...(typeof effort === 'string' ? { reasoningEffort: effort } : {}) };
-    return Object.keys(openai).length > 0 ? { openai } : undefined;
-  },
+  mapModelOptions: openaiPreset.mapModelOptions!,
   rateLimits: composeRateLimits(ietfRateLimits, openaiRateLimits),
   pricing: openrouterPricing,
   createBatch: (connection) =>

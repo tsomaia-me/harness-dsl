@@ -553,7 +553,7 @@ class Walker {
     const recalled = await this.recallFor(role, options);
     if (!response) {
       await this.ceiling(addr);
-      const resume = this.input.resume?.step === addr && this.input.resume.decision !== undefined && decided ? { ...(recorded?.sessionId ? { sessionId: recorded.sessionId } : {}), halt: decided.halt, decision: this.input.resume.decision } : undefined;
+      const resume = decided ? { ...(recorded?.sessionId ? { sessionId: recorded.sessionId } : {}), halt: decided.halt, decision: decided.decision } : undefined;
       const workspacePath = options.workspace ? await this.workspacePath() : undefined;
       const guard = options.guard && workspacePath ? this.guardFor(seat, driver, options, workspacePath, key, addr) : undefined;
       let call;

@@ -122,11 +122,14 @@ export async function buildMemo(
         }
         break;
       }
-      case 'decisionRecorded':
+      case 'decisionRecorded': {
         decisions.set(event.step, event.decision);
         decided.set(event.step, { halt: event.halt, decision: event.decision });
+        const asked = invocations.get(event.step);
+        if (asked) invocations.set(event.step, { ...asked, ended: false });
         blocked = undefined;
         break;
+      }
       case 'haltNotAsked':
         notAsked.add(event.step);
         break;

@@ -16,6 +16,24 @@ export interface GeminiCliAdapterOptions {
   readonly apiKey?: string;
 }
 
+/** One guarded run at a time per directory: the settings file is the directory's, not the run's. */
+const settingsTurns = new Map<string, Promise<void>>();
+
+async function takeSettingsTurn(dir: string): Promise<() => void> {
+  const previous = settingsTurns.get(dir) ?? Promise.resolve();
+  let release: () => void = () => undefined;
+  const mine = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const turn = previous.then(() => mine);
+  settingsTurns.set(dir, turn);
+  await previous;
+  return () => {
+    release();
+    if (settingsTurns.get(dir) === turn) settingsTurns.delete(dir);
+  };
+}
+
 /** The hook settings Gemini CLI reads from `.gemini/settings.json` in the directory it runs in. */
 export function geminiHookSettings(endpoint: string, subscriptions: HookSubscriptions): Record<string, unknown> {
   const hook = { type: 'command', command: `curl -sS -X POST "${endpoint}" -H "content-type: application/json" --data-binary @-`, timeout: 30_000 };
@@ -81,9 +99,10 @@ export function geminiCliAdapter(options: GeminiCliAdapterOptions = {}): CliAgen
         }
       }
     },
-    placeHookSettings(req, endpoint, subscriptions) {
+    async placeHookSettings(req, endpoint, subscriptions) {
       const dir = path.join(req.workDir, '.gemini');
       const file = path.join(dir, 'settings.json');
+      const done = await takeSettingsTurn(path.resolve(req.workDir));
       const previous = existsSync(file) ? readFileSync(file, 'utf8') : undefined;
       mkdirSync(dir, { recursive: true });
       writeFileSync(file, JSON.stringify(geminiHookSettings(hookEndpointUrl(endpoint, req.invocationId!), subscriptions), null, 2), 'utf8');
@@ -92,6 +111,7 @@ export function geminiCliAdapter(options: GeminiCliAdapterOptions = {}): CliAgen
         cleanup: () => {
           if (previous === undefined) rmSync(file, { force: true });
           else writeFileSync(file, previous, 'utf8');
+          done();
         },
       };
     },

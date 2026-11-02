@@ -227,7 +227,7 @@ describe('the anthropic adapter', () => {
       [request(account, opus.id, { idempotencyKey: 'u1/grade#0', halts: [] }), request(account, opus.id, { idempotencyKey: 'u1/grade#1', halts: [] })],
       resolver,
     );
-    expect.soft(jobId).toBe('ANTHROPIC_KEY:msgbatch_01');
+    expect.soft(jobId).toBe('ANTHROPIC_KEY:2:msgbatch_01');
     expect.soft(submitted[0]?.requests.map((entry: any) => entry.custom_id)).toEqual(['0:u1/grade#0', '1:u1/grade#1']);
     expect.soft(submitted[0]?.requests[0].params.model).toBe('claude-opus-5-5');
     expect.soft(await driver.collectBatch!(jobId, resolver)).toBeUndefined();

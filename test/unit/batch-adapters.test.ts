@@ -53,7 +53,7 @@ describe('the OpenRouter batch adapter', () => {
 
   it('submits chat completions with a JSON schema response format, polls, and maps results by custom id', async () => {
     const { calls, fetchFn } = openrouterFetch([{ id: 'batch_01', status: 'in_progress' }, completed]);
-    const batch = openrouterBatchAdapter({ apiKey: () => 'or-key', fetch: fetchFn, pricing: tenCentsPerCall, discount: 0.5 });
+    const batch = openrouterBatchAdapter({ apiKey: () => 'or-key', fetch: fetchFn, pricing: tenCentsPerCall });
     const { batchId } = await batch.submit(
       [
         { customId: 'item-0', systemPrompt: 'Audit', userPrompt: 'Check a.ts', outputJsonSchema: SCHEMA },
@@ -86,7 +86,7 @@ describe('the OpenRouter batch adapter', () => {
       ['item-1', false, 'invalid_request: too long'],
       ['item-0', true, { severity: 'low' }],
     ]);
-    expect.soft(done.results?.[1]?.usage).toEqual({ inputTokens: 200, cachedInputTokens: 50, cacheWriteTokens: 0, outputTokens: 30, actualCostUsd: 0.05, equivalentCostUsd: 0.1 });
+    expect.soft(done.results?.[1]?.usage).toEqual({ inputTokens: 200, cachedInputTokens: 50, cacheWriteTokens: 0, outputTokens: 30, actualCostUsd: 0.0042, equivalentCostUsd: 0.1 });
     expect(done.results?.[0]?.usage.actualCostUsd).toBe(0);
   });
 
@@ -175,7 +175,7 @@ describe('the google and openrouter model adapters', () => {
       }) as typeof fetch,
     });
     expect.soft(gDriver).toMatchObject({ driver: 'google', hooks: false });
-    expect.soft(await gDriver.submitBatch!([request(gAccount, gModel.id, 'u1/grade#0')], resolver)).toEqual({ jobId: 'GEMINI_KEY:batches/g1' });
+    expect.soft(await gDriver.submitBatch!([request(gAccount, gModel.id, 'u1/grade#0')], resolver)).toEqual({ jobId: 'GEMINI_KEY:1:batches/g1' });
     expect.soft(gCalls[0]?.headers['x-goog-api-key']).toBe('secret-GEMINI_KEY');
     expect.soft(gCalls[0]?.body.batch.input_config.requests.requests[0].metadata.key).toBe('0:u1/grade#0');
 
@@ -189,7 +189,7 @@ describe('the google and openrouter model adapters', () => {
         return json({ id: 'batch_9', status: 'validating' }, 202);
       }) as typeof fetch,
     });
-    expect.soft(await orDriver.submitBatch!([request(orAccount, orModel.id, 'u1/grade#0')], resolver)).toEqual({ jobId: 'OPEN_ROUTER_API_KEY:batch_9' });
+    expect.soft(await orDriver.submitBatch!([request(orAccount, orModel.id, 'u1/grade#0')], resolver)).toEqual({ jobId: 'OPEN_ROUTER_API_KEY:1:batch_9' });
     expect.soft(orCalls[0]?.url).toBe('https://openrouter.ai/api/v1/batches');
     expect(orCalls[0]?.headers.authorization).toBe('Bearer secret-OPEN_ROUTER_API_KEY');
   });

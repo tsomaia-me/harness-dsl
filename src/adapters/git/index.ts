@@ -8,7 +8,8 @@ export interface GitWorktreeOptions {
   readonly repo: string;
   /** Where the worktrees live; one directory per attempt. Default: `<repo>/.harness/worktrees`. */
   readonly root?: string;
-  readonly baseBranch?: string;
+  /** The commit the worktree starts from; `HEAD` of the repository when none is given. */
+  readonly base?: string;
 }
 
 /** A git worktree per attempt on branch `harness/<attemptId>`; the path is a function of the attempt, so a restart finds it. */
@@ -20,7 +21,7 @@ export function worktreeBackend(options: GitWorktreeOptions): WorkspaceBackend {
       const dir = dirOf(attemptId);
       if (!existsSync(dir)) {
         mkdirSync(root, { recursive: true });
-        await simpleGit(options.repo).raw(['worktree', 'add', '-B', `harness/${attemptId}`, dir, options.baseBranch ?? 'HEAD']);
+        await simpleGit(options.repo).raw(['worktree', 'add', '-B', `harness/${attemptId}`, dir, options.base ?? 'HEAD']);
       }
       return { path: dir };
     },

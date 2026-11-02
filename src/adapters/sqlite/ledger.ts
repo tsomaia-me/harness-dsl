@@ -21,6 +21,7 @@ import type {
   WriterClaim,
 } from '../../kernel/index.js';
 import type { Json, JsonObject } from '../../kernel/refs.js';
+import { parseWithDates, stringifyWithDates } from '../json-dates.js';
 import { leases, ledgerEvents, loops, stepOutputs, timers, units, writer as writerTable } from './ledger-schema.js';
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../../drizzle-ledger', import.meta.url));
@@ -42,21 +43,6 @@ type UnitRow = typeof units.$inferSelect;
 
 function stepAddress(step: string, iteration: number): string {
   return `${step}@${iteration}`;
-}
-
-function serializeEvent(event: LedgerEvent): string {
-  return JSON.stringify(event, function (this: Record<string, unknown>, key: string, value: unknown) {
-    const raw = this[key];
-    return raw instanceof Date ? { $date: raw.toISOString() } : value;
-  });
-}
-
-function deserializeEvent(payload: string): LedgerEvent {
-  return JSON.parse(payload, (_key, value: unknown) =>
-    typeof value === 'object' && value !== null && '$date' in value && typeof (value as { $date: unknown }).$date === 'string'
-      ? new Date((value as { $date: string }).$date)
-      : value,
-  ) as LedgerEvent;
 }
 
 function unitIdOf(event: LedgerEvent): string | null {
@@ -94,7 +80,7 @@ export class SqliteLedger implements Ledger {
       for (const event of events) {
         const inserted = this.db
           .insert(ledgerEvents)
-          .values({ type: event.type, unitId: unitIdOf(event), attemptId: attemptIdOf(event), atMs: event.at.getTime(), payload: serializeEvent(event) })
+          .values({ type: event.type, unitId: unitIdOf(event), attemptId: attemptIdOf(event), atMs: event.at.getTime(), payload: stringifyWithDates(event) })
           .returning({ seq: ledgerEvents.seq })
           .get();
         seqs.push(inserted.seq);
@@ -114,7 +100,7 @@ export class SqliteLedger implements Ledger {
       if (query.since !== undefined) conditions.push(sql`${ledgerEvents.atMs} >= ${query.since.getTime()}`);
       const rows = this.db.select().from(ledgerEvents).where(and(...conditions)).orderBy(asc(ledgerEvents.seq)).limit(READ_PAGE).all();
       for (const row of rows) {
-        yield { seq: row.seq, event: deserializeEvent(row.payload) };
+        yield { seq: row.seq, event: parseWithDates<LedgerEvent>(row.payload) };
         after = row.seq;
       }
       if (rows.length < READ_PAGE) return;
@@ -153,9 +139,14 @@ export class SqliteLedger implements Ledger {
     return this.sqlite.transaction(() => {
       const holders = this.db.select().from(leases).where(eq(leases.resource, resource)).all();
       const own = holders.find((lease) => lease.attemptId === attemptId);
-      if (own) return own.mode === mode || mode === 'shared';
       const others = holders.filter((lease) => lease.attemptId !== attemptId);
       const free = mode === 'exclusive' ? others.length === 0 : others.every((lease) => lease.mode === 'shared');
+      if (own) {
+        if (own.mode === mode || mode === 'shared') return true;
+        if (!free) return false;
+        this.db.update(leases).set({ mode }).where(and(eq(leases.resource, resource), eq(leases.attemptId, attemptId))).run();
+        return true;
+      }
       if (!free) return false;
       this.db.insert(leases).values({ resource, attemptId, mode }).run();
       return true;
@@ -424,9 +415,3 @@ export class SqliteLedger implements Ledger {
     }
   }
 }
-
-export const sqlite = {
-  ledger(options: SqliteLedgerOptions): SqliteLedger {
-    return new SqliteLedger(options);
-  },
-};

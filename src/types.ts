@@ -25,16 +25,6 @@ export interface RateLimitAdapter {
   fromResponse(response: RateLimitResponse, nowMs: number): QuotaPatch;
 }
 
-export interface QuotaPolicy {
-  readonly thresholds: Readonly<Record<string, number>>;
-  readonly defaultThreshold: number;
-  readonly probeStalenessMs: number;
-  readonly tokenBudget: number | null;
-  readonly shareResetWindowId: string | null;
-  readonly defaultCooldownMs: number;
-  readonly unavailableCooldownMs: number;
-}
-
 export interface TokenCounts {
   readonly inputTokens: number;
   readonly cachedInputTokens: number;
@@ -70,6 +60,8 @@ export interface DriverInvokeRequest {
   readonly resumeSession?: boolean;
   readonly inactivityTimeoutMs: number;
   readonly signal: AbortSignal;
+  /** Told the agent's pid once it is spawned, so a crashed harness can report the session as running. */
+  readonly onSpawn?: (pid: number) => void;
 }
 
 export interface DriverInvokeResult {
@@ -112,8 +104,6 @@ export interface BatchAdapter {
 export interface Driver {
   readonly kind: string;
   invoke(req: DriverInvokeRequest): Promise<DriverInvokeResult>;
-  probeQuota?(accountId: string): Promise<QuotaPatch>;
-  readonly quotaPolicy?: Partial<QuotaPolicy>;
   readonly hookProtocol?: HookProtocol;
   readonly batch?: BatchAdapter;
 }
@@ -142,7 +132,6 @@ export interface Runner {
     command: string,
     opts?: CommandExecOptions,
   ): Promise<CommandExecResult & { slotIndex: number; slotPorts: readonly number[] }>;
-  syncGitRef?(localWorkDir: string, sha: string, targetRef: string): Promise<void>;
 }
 
 export type ToolEventPhase = 'pre-tool' | 'post-tool' | 'stop';
@@ -155,14 +144,12 @@ export interface ToolEvent {
   readonly toolName?: string;
   readonly filePaths: readonly string[];
   readonly sessionId?: string;
-  readonly transcriptPath?: string;
   readonly raw: Readonly<Record<string, unknown>>;
 }
 
 export interface HookDecision {
   readonly allow: boolean;
   readonly reason?: string;
-  readonly additionalContext?: string;
 }
 
 export interface HookSubscriptions {
@@ -175,5 +162,4 @@ export interface HookProtocol {
   buildSettings(endpoint: string, subscriptions: HookSubscriptions): Record<string, unknown>;
   parse(payload: Record<string, unknown>): ToolEvent | null;
   formatDecision(event: ToolEvent, decision: HookDecision): Record<string, unknown>;
-  readContextTokens(transcriptPath: string): number;
 }

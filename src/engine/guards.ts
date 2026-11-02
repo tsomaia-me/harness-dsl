@@ -24,7 +24,8 @@ export interface GuardHost {
   runCheck(exec: Executable<void, unknown>, cwd: string): Promise<{ readonly ok: boolean; readonly detail: string }>;
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+/** The whole body of a request, as the hook server and the HTTP clients read it. */
+export function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
     req.on('data', (chunk: Buffer) => {
@@ -60,7 +61,14 @@ export class GuardServer {
           return;
         }
         const body = await readBody(req);
-        const payload = body.trim() ? (JSON.parse(body) as JsonObject) : {};
+        let payload: JsonObject;
+        try {
+          payload = body.trim() ? (JSON.parse(body) as JsonObject) : {};
+        } catch {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'the hook payload is not JSON' }));
+          return;
+        }
         const answer = await this.handle(url.searchParams.get('invocation'), payload);
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify(answer));

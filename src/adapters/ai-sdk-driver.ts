@@ -3,9 +3,9 @@ import type { ModelDriver, ModelRequest, ModelResponse } from '../kernel/backend
 import type { Account } from '../kernel/quota.js';
 import type { EnvRef, Resolver } from '../kernel/refs.js';
 import type { BatchItemResult } from '../types.js';
-import { DEFAULT_RATE_LIMIT_COOLDOWN_MS, DEFAULT_UNAVAILABLE_COOLDOWN_MS, envelopeSchema, refusalOf, systemPrompt, tokensOf, unpack, userPrompt, windowsOf } from './model-calls.js';
+import { DEFAULT_INACTIVITY_TIMEOUT_MS, DEFAULT_RATE_LIMIT_COOLDOWN_MS, DEFAULT_UNAVAILABLE_COOLDOWN_MS, envelopeSchema, equivalentOf, refusalOf, systemPrompt, tokensOf, unpack, userPrompt, windowsOf } from './model-calls.js';
 
-export const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60_000;
+export { DEFAULT_INACTIVITY_TIMEOUT_MS };
 
 export interface AiSdkModelDriverOptions {
   readonly fetch?: typeof fetch;
@@ -19,10 +19,18 @@ function indexOf(customId: string): number {
   return Number(customId.slice(0, customId.indexOf(':')));
 }
 
+/** A job id is `<credential env name>:<request count>:<batch id>`, so a restarted harness collects it and checks it whole. */
+function parseJobId(jobId: string): { readonly credential: string; readonly count: number; readonly batchId: string } {
+  const [credential, count, ...rest] = jobId.split(':');
+  const batchId = rest.join(':');
+  if (!credential || !count || !/^\d+$/.test(count) || !batchId) throw new Error(`job id "${jobId}" is not "<credential>:<count>:<batch id>"`);
+  return { credential, count: Number(count), batchId };
+}
+
 /**
  * The 0.3.0 AI SDK driver with one provider preset behind the 0.4.0 `ModelDriver` contract. One inner
- * driver per credential. A batch's job id carries the credential's env name so a restarted harness can
- * still collect it, and results are aligned by an index prefix on the custom id.
+ * driver per credential. A batch's job id carries the credential's env name and the request count so a
+ * restarted harness can collect it and check it whole; results are aligned by an index prefix on the custom id.
  */
 export class AiSdkModelDriver<D extends string> implements ModelDriver<D> {
   public readonly name: string;
@@ -72,13 +80,13 @@ export class AiSdkModelDriver<D extends string> implements ModelDriver<D> {
         runId: request.idempotencyKey,
         stepName: request.seat,
         inactivityTimeoutMs: this.options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS,
-        signal: new AbortController().signal,
+        signal: request.cancel ?? new AbortController().signal,
       });
     } catch (err) {
       throw refusalOf(err, request.account.name, Date.now(), this.cooldowns()) ?? err;
     }
     const windows = windowsOf(result.quotaHint);
-    return { ...unpack(result.structuredOutput), costUsd: result.usage.actualCostUsd, tokens: tokensOf(result.usage), ...(windows.length > 0 ? { windows } : {}) };
+    return { ...unpack(result.structuredOutput), costUsd: result.usage.actualCostUsd, ...equivalentOf(result.usage), tokens: tokensOf(result.usage), ...(windows.length > 0 ? { windows } : {}) };
   }
 
   public async submitBatch(requests: readonly ModelRequest[], resolver: Resolver): Promise<{ readonly jobId: string }> {
@@ -92,23 +100,24 @@ export class AiSdkModelDriver<D extends string> implements ModelDriver<D> {
         first.model,
         {},
       );
-      return { jobId: `${first.account.credential!.name}:${batchId}` };
+      return { jobId: `${first.account.credential!.name}:${requests.length}:${batchId}` };
     } catch (err) {
       throw refusalOf(err, first.account.name, Date.now(), this.cooldowns()) ?? err;
     }
   }
 
   public async collectBatch(jobId: string, resolver: Resolver): Promise<readonly ModelResponse[] | undefined> {
-    const separator = jobId.indexOf(':');
-    const batch = this.inner({ ref: 'env', name: jobId.slice(0, separator) }, resolver).batch;
+    const { credential, count, batchId } = parseJobId(jobId);
+    const batch = this.inner({ ref: 'env', name: credential }, resolver).batch;
     if (!batch) throw new Error(`the ${this.driver} driver has no batch adapter`);
-    const polled = await batch.poll(jobId.slice(separator + 1));
+    const polled = await batch.poll(batchId);
     if (polled.status === 'running') return undefined;
     if (polled.status === 'failed' || !polled.results) throw new Error(`batch "${jobId}" failed`);
+    if (polled.results.length !== count) throw new Error(`batch "${jobId}" returned ${polled.results.length} results for ${count} requests`);
     const failed = polled.results.filter((item) => !item.ok);
     if (failed.length > 0) throw new Error(`batch "${jobId}" has failed items: ${failed.map((item) => `${item.customId}: ${item.error ?? 'unknown'}`).join('; ')}`);
     return [...polled.results]
       .sort((p, q) => indexOf(p.customId) - indexOf(q.customId))
-      .map((item: BatchItemResult) => ({ ...unpack(item.structuredOutput), costUsd: item.usage.actualCostUsd, tokens: tokensOf(item.usage) }));
+      .map((item: BatchItemResult) => ({ ...unpack(item.structuredOutput), costUsd: item.usage.actualCostUsd, ...equivalentOf(item.usage), tokens: tokensOf(item.usage) }));
   }
 }

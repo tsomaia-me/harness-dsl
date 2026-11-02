@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { readBody } from '../../engine/guards.js';
 import type { Client, ClientEndpoint, ControlApi, Grant } from '../../kernel/backends.js';
 import type { Json, JsonObject, PortRef, Resolver } from '../../kernel/refs.js';
 
@@ -15,17 +16,6 @@ export interface SupervisorOptions {
 }
 
 const { version: PACKAGE_VERSION } = createRequire(import.meta.url)('../../../package.json') as { version: string };
-
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (chunk: Buffer) => {
-      data += chunk.toString('utf8');
-    });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
-  });
-}
 
 function toolName(operation: string): string {
   return operation.replace(/\./g, '_');
@@ -134,15 +124,14 @@ export class SessionDef {
     private readonly options: SessionOptions,
   ) {}
 
-  public mcpConfig(resolver: Resolver): JsonObject {
-    void resolver;
+  public mcpConfig(): JsonObject {
     return { mcpServers: Object.fromEntries(this.options.endpoints.map((endpoint) => [endpoint.name, { type: 'http', url: endpoint.url() }])) };
   }
 
   /** Writes `.mcp.json` into the directory the session is started from and returns its path. */
-  public write(dir: string, resolver: Resolver): string {
+  public write(dir: string): string {
     const file = path.join(dir, '.mcp.json');
-    writeFileSync(file, `${JSON.stringify(this.mcpConfig(resolver), null, 2)}\n`, 'utf8');
+    writeFileSync(file, `${JSON.stringify(this.mcpConfig(), null, 2)}\n`, 'utf8');
     return file;
   }
 }

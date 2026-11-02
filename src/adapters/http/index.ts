@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ControlError } from '../../engine/control.js';
+import { readBody } from '../../engine/guards.js';
 import type { Client, ClientEndpoint, ControlApi, Grant } from '../../kernel/backends.js';
 import type { EnvRef, Json, PortRef, Resolver } from '../../kernel/refs.js';
 
@@ -8,17 +9,6 @@ export interface HttpControlApiOptions {
   readonly port: number | PortRef;
   readonly token: EnvRef;
   readonly grants: readonly Grant[];
-}
-
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (chunk: Buffer) => {
-      data += chunk.toString('utf8');
-    });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
-  });
 }
 
 function reply(res: ServerResponse, status: number, body: Json): void {

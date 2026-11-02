@@ -110,6 +110,30 @@ describe('the gemini-cli adapter', () => {
     expect((error as AccountRefusedError).until.getTime()).toBeGreaterThanOrEqual(before + untilMs - 1_000);
   });
 
+  it('two guarded runs in one workspace take turns at the settings file', async () => {
+    const gates: (() => void)[] = [];
+    const seen: string[] = [];
+    const spawnBridge = async (_args: readonly string[], _env: Record<string, string>, cwd: string, onLine: (line: string) => void) => {
+      seen.push(readFileSync(path.join(cwd, '.gemini', 'settings.json'), 'utf8'));
+      await new Promise<void>((resolve) => gates.push(resolve));
+      for (const line of success('{"result":{"verdict":"ship"}}')) onLine(JSON.stringify(line));
+      return { exitCode: 0, stderr: '' };
+    };
+    const driver = geminiCli.driver({ spawnBridge, workDir: dir, sessionDir: path.join(dir, 'sessions') });
+    const guard = (invocation: string) => ({ endpoint: 'http://127.0.0.1:4100', invocation, leases: true, stop: false });
+    const first = driver.invoke(request({ idempotencyKey: 'u1/review', guard: guard('u1/review') }), resolver);
+    const second = driver.invoke(request({ idempotencyKey: 'u2/review', guard: guard('u2/review') }), resolver);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect.soft(seen).toHaveLength(1);
+    gates[0]!();
+    await first;
+    while (gates.length < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+    gates[1]!();
+    await second;
+    expect.soft(seen.map((text) => /invocation=([^"&\\]+)/.exec(text)?.[1])).toEqual(['u1%2Freview', 'u2%2Freview']);
+    expect(existsSync(path.join(dir, '.gemini', 'settings.json'))).toBe(false);
+  });
+
   it('places hook settings in the workspace for a guarded step and restores the file after, and speaks the guard protocol', async () => {
     let seen: Record<string, any> | undefined;
     const { spawnBridge } = bridge(success('{"result":{"verdict":"ship"}}'), undefined, (cwd) => {

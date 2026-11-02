@@ -12,6 +12,10 @@ export const ALLOWANCE_WINDOWS: ReadonlySet<string> = new Set([ANTHROPIC_5H_WIND
 /** How long an account rests after a rate limit that names no reset, and after a failed login. */
 export const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 60_000;
 export const DEFAULT_UNAVAILABLE_COOLDOWN_MS = 15 * 60_000;
+/** How long a call may stay silent before the driver gives up on it. */
+export const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60_000;
+/** A refusal's detail on the partition is a reason, not a log: the provider's text is cut here. */
+export const REFUSAL_DETAIL_LIMIT = 500;
 
 export interface Cooldowns {
   readonly rateLimitCooldownMs: number;
@@ -80,6 +84,11 @@ export function tokensOf(usage: TokenUsage): number {
   return usage.inputTokens + usage.outputTokens;
 }
 
+/** The list price of a call whose charge differs from it: a prepaid plan's zero, a batch's discount. */
+export function equivalentOf(usage: TokenUsage): Pick<ModelResponse, 'equivalentUsd'> {
+  return usage.equivalentCostUsd !== null && usage.equivalentCostUsd !== usage.actualCostUsd ? { equivalentUsd: usage.equivalentCostUsd } : {};
+}
+
 export function windowsOf(patch: QuotaPatch | undefined): ObservedWindow[] {
   return (patch?.windows ?? []).flatMap((window) =>
     typeof window.utilization === 'number'
@@ -92,9 +101,9 @@ export function windowsOf(patch: QuotaPatch | undefined): ObservedWindow[] {
 export function refusalOf(err: unknown, account: string, nowMs: number, cooldowns: Cooldowns): AccountRefusedError | undefined {
   if (err instanceof RateLimitedError) {
     const until = new Date(err.quota.cooldownUntilMs ?? nowMs + cooldowns.rateLimitCooldownMs);
-    return new AccountRefusedError(account, 'rateLimited', until, err.message, windowsOf(err.quota));
+    return new AccountRefusedError(account, 'rateLimited', until, err.message.slice(0, REFUSAL_DETAIL_LIMIT), windowsOf(err.quota));
   }
-  if (err instanceof AccountUnavailableError) return new AccountRefusedError(account, 'unavailable', new Date(nowMs + cooldowns.unavailableCooldownMs), err.reason);
+  if (err instanceof AccountUnavailableError) return new AccountRefusedError(account, 'unavailable', new Date(nowMs + cooldowns.unavailableCooldownMs), err.reason.slice(0, REFUSAL_DETAIL_LIMIT));
   return undefined;
 }
 

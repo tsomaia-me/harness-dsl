@@ -113,8 +113,8 @@ describe('clients and observers', () => {
     await client.close();
 
     const session = claudeCode.session('owner', { endpoints: [head] });
-    expect.soft(session.mcpConfig(resolver)).toEqual({ mcpServers: { head: { type: 'http', url: `${head.url()}` } } });
-    const written = session.write(dir, resolver);
+    expect.soft(session.mcpConfig()).toEqual({ mcpServers: { head: { type: 'http', url: `${head.url()}` } } });
+    const written = session.write(dir);
     expect.soft(written).toBe(path.join(dir, '.mcp.json'));
     expect(existsSync(written)).toBe(true);
   });

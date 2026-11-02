@@ -27,6 +27,8 @@ export interface SshRunnerOptions extends LocalRunnerOptions {
   readonly maxCpuLoadRatio?: number;
   readonly minFreeDiskGb?: number;
   readonly sshBinary?: string;
+  /** The private key `ssh -i` signs in with; the agent's keys serve when none is given. */
+  readonly identityFile?: string;
   readonly skipPreFlightCheck?: boolean;
   readonly healthProbeFn?: (host: string, workDir: string) => Promise<SshHealthSnapshot>;
 }
@@ -329,6 +331,7 @@ export class SshRunner extends BaseSlotRunner {
   public readonly maxCpuLoadRatio: number;
   public readonly minFreeDiskGb: number;
   private readonly sshBinary: string;
+  private readonly identityFile: string | undefined;
   private readonly skipPreFlightCheck: boolean;
   private readonly healthProbeFn?: (host: string, workDir: string) => Promise<SshHealthSnapshot>;
 
@@ -339,6 +342,7 @@ export class SshRunner extends BaseSlotRunner {
     this.maxCpuLoadRatio = opts.maxCpuLoadRatio ?? 1.5;
     this.minFreeDiskGb = opts.minFreeDiskGb ?? 5;
     this.sshBinary = opts.sshBinary ?? 'ssh';
+    this.identityFile = opts.identityFile;
     this.skipPreFlightCheck = opts.skipPreFlightCheck ?? false;
     this.healthProbeFn = opts.healthProbeFn;
   }
@@ -360,13 +364,16 @@ export class SshRunner extends BaseSlotRunner {
       'ServerAliveInterval=5',
       '-o',
       'ServerAliveCountMax=2',
+      ...(this.identityFile ? ['-i', this.identityFile] : []),
     ];
   }
 
+  /** The remote command runs in `cwd`, or in the host's work directory when the command names none. */
   public buildSshCommandArgs(
     command: string,
     slotIndex: number,
     extraEnv?: Record<string, string>,
+    cwd?: string,
   ): string[] {
     const envVars = this.buildSlotEnv(slotIndex, this.portsForSlot(slotIndex), extraEnv);
     const exports = Object.entries(envVars).map(([name, value]) => {
@@ -375,7 +382,7 @@ export class SshRunner extends BaseSlotRunner {
     });
     const script = [
       'trap "kill -TERM -$$ 2>/dev/null; sleep 0.2; kill -KILL -$$ 2>/dev/null" EXIT INT TERM HUP;',
-      `cd ${shellQuote(this.workDir)} &&`,
+      `cd ${shellQuote(cwd ?? this.workDir)} &&`,
       ...exports,
       command,
     ].join(' ');
@@ -437,30 +444,13 @@ export class SshRunner extends BaseSlotRunner {
     if (!this.skipPreFlightCheck) {
       await this.checkRemoteHealth();
     }
-    const sshArgs = this.buildSshCommandArgs(command, slotIndex, opts?.env);
+    const sshArgs = this.buildSshCommandArgs(command, slotIndex, opts?.env, opts?.cwd);
     return this.runSpawnedProcess(this.sshBinary, sshArgs, `ssh ${this.host}: ${command}`, {
-      cwd: opts?.cwd,
       env: {},
       timeoutMs: opts?.timeoutMs ?? this.defaultTimeoutMs,
       inactivityTimeoutMs: opts?.inactivityTimeoutMs ?? this.defaultInactivityTimeoutMs,
       reject: opts?.reject ?? true,
       signal: opts?.signal,
     });
-  }
-
-  public async syncGitRef(localWorkDir: string, sha: string, targetRef: string): Promise<void> {
-    const remoteUrl = `ssh://${this.host}${this.workDir}`;
-    await this.runSpawnedProcess(
-      'git',
-      ['-C', localWorkDir, 'push', '-f', remoteUrl, `${sha}:${targetRef}`],
-      `git push ${remoteUrl} ${sha}:${targetRef}`,
-      {
-        cwd: localWorkDir,
-        env: {},
-        timeoutMs: 120_000,
-        inactivityTimeoutMs: 60_000,
-        reject: true,
-      },
-    );
   }
 }

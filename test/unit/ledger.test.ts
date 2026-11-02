@@ -186,6 +186,16 @@ describe('SqliteLedger', () => {
     expect(await ledger.takeLease('a1', 'users-db', 'shared')).toBe(false);
   });
 
+  it('upgrades an attempt\'s shared lease to exclusive when nobody else holds the resource', async () => {
+    await ledger.append([...created('u1', 'A'), started('u1', 'a1', 1, 1), ...created('u2', 'B'), started('u2', 'a2', 1, 1)], 'me');
+    expect.soft(await ledger.takeLease('a1', 'orders-db', 'shared')).toBe(true);
+    expect.soft(await ledger.takeLease('a1', 'orders-db', 'exclusive')).toBe(true);
+    expect.soft(await ledger.takeLease('a2', 'orders-db', 'shared')).toBe(false);
+    expect.soft(await ledger.takeLease('a2', 'users-db', 'shared')).toBe(true);
+    expect.soft(await ledger.takeLease('a1', 'users-db', 'shared')).toBe(true);
+    expect(await ledger.takeLease('a1', 'users-db', 'exclusive')).toBe(false);
+  });
+
   it('claims the writer once, refuses a live holder, renews, and takes over from a dead one', async () => {
     const other = new SqliteLedger({ path: ledger.path });
     try {

@@ -34,7 +34,7 @@ describe('infrastructure adapters', () => {
   });
 
   it('declares an SSH host as a runner', () => {
-    const box = ssh.host('box', { host: 'user@box', workDir: '/srv/app', skipPreFlightCheck: true });
+    const box = ssh.host('box', { host: 'box', user: 'user', workDir: '/srv/app' });
     expect.soft(box).toMatchObject({ entity: 'runner', name: 'box', slotCount: 1 });
     expect(box.slots(3).slotCount).toBe(3);
   });
