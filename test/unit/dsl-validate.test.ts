@@ -154,6 +154,10 @@ describe('startup validation', () => {
     const flow = H.flow('f').input(attrs).step('run', bare).exit('done');
     const lane = H.lane('bugs', Bug).handler(flow, { exits: { done: Done } }).retry({ tries: 0, exhausted: Failed });
     expect(rules(H.harness('h').ledger(fakeLedger()).lanes(lane).scheduler(H.scheduler('s').standard(lane)))).toContain(19);
+    const external = H.command('deploy').argv(['deploy']).runner(local).output(z.object({ url: z.string() })).effect('external', async () => true);
+    const flow2 = H.flow('f').input(attrs).step('run', external).exit('done');
+    const lane2 = H.lane('bugs', Bug).handler(flow2, { exits: { done: Done } }).retry({ tries: 0, exhausted: Failed });
+    expect(rules(H.harness('h').ledger(fakeLedger()).lanes(lane2).scheduler(H.scheduler('s').standard(lane2)))).toContain(19);
   });
 
   it('21 and 22: a unit-span loop inside a loop, and a name used twice', () => {

@@ -228,6 +228,7 @@ export function validate(harness: HarnessDef): readonly Problem[] {
     if (!command.argvOf) fail(19, `command "${command.name}" has no argv`);
     if (!command.runnerChoice) fail(19, `command "${command.name}" has no runner`);
     if (command.effectKind === 'external' && !command.detect) fail(19, `command "${command.name}" has an external effect without detect`);
+    if (command.effectKind === 'external' && command.outputSchema) fail(19, `command "${command.name}" has an external effect and an output schema; after detect reports the effect happened, no output exists to parse`);
   }
 
   const resolvable = new Set<string>();
