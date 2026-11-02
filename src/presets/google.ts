@@ -1,3 +1,4 @@
+import { googleBatchAdapter } from '../batch/google.js';
 import type { ProviderPreset } from '../drivers/ai-sdk.js';
 import { googlePricing } from '../pricing/google.js';
 import { googleRateLimits } from '../rate-limits/google.js';
@@ -17,4 +18,11 @@ export const googlePreset: ProviderPreset = {
   },
   rateLimits: googleRateLimits,
   pricing: googlePricing,
+  createBatch: (connection) =>
+    googleBatchAdapter({
+      apiKey: connection.apiKey,
+      baseURL: connection.baseURL,
+      fetch: connection.fetch,
+      pricing: connection.pricing,
+    }),
 };

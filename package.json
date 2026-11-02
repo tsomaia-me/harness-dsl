@@ -59,6 +59,14 @@
     "./jsonl": {
       "types": "./dist/adapters/jsonl/index.d.ts",
       "default": "./dist/adapters/jsonl/index.js"
+    },
+    "./google": {
+      "types": "./dist/adapters/google/index.d.ts",
+      "default": "./dist/adapters/google/index.js"
+    },
+    "./openrouter": {
+      "types": "./dist/adapters/openrouter/index.d.ts",
+      "default": "./dist/adapters/openrouter/index.js"
     }
   },
   "scripts": {
