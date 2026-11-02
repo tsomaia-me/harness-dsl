@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.4.0
+
+A new kernel. A flow is a declared tree of named steps, never an async function; every effect has an address on a ledger and the engine replays from it. Work is units of a kind with declared states and positions, queued through lanes with a scheduler; seats sit on model pools whose accounts draw on shared quota partitions; halts are typed questions resolved by clients, policies or clocks; triggers and metrics read the event stream; clients get typed grants; observers subscribe. The core names no provider; every provider, CLI, store and transport is an adapter on a kernel contract, exported as a subpath.
+
+### Added
+
+- **Kernel contracts** (`harness-dsl/kernel`): `Ledger`, `QuotaPartition`, `Store`, `MemoryStore`, `Supplier`, `ModelDriver` (`invoke`, `session`, `submitBatch`, `collectBatch`, `hooks`, `guardProtocol`), `RunnerBackend`, `WorkspaceBackend`, `Client`, `ControlApi`, `Observer`, `Resolver`, and the ledger event union.
+- **The DSL** (`H.*`): kinds and states, signals and halts, resources and facets, roles, memory and journals, pools, seats, commands, jobs and batches, flows (`step`, `halt`, `read`, `spawn`, `wait`, `when`, `parallel`, `loop` with carry and span, `exit`), lanes (supply, handler with an exit map, store, typed retry end states, leases, order, reactions, ceilings), triggers and sources, metrics, policies, the scheduler, grants and operations, the harness. `validate(harness)` with 22 startup rules.
+- **The engine**: addresses and a flow version; replay over the ledger; `effect` handling for commands; seat recovery through the driver's session; jobs collected, never resubmitted; loops with carry and span; halts with facets, skip policies, timeouts and escalations; reactions with deferred patches and rewinds; retry and exhaustion; demand per tick (WIP, pause, expedite holds, fixed dates, aging, admission); triggers with crossings per facet and hysteresis; metrics folded with sample counts; account rotation on refusal and a `budget` block; `distinct` model policies by registration precedence; recall by journal policy with track records; guards (area leases on write, `beforeStop` checks) through the hook protocol; the control API; observers and subscribers on every append; `Runtime.run()`.
+- **Adapters**: `sqlite` (ledger, quota partition), `claude-code` (driver, supervisor over MCP, session config), `anthropic`, `google`, `openrouter` (AI SDK drivers with batch), `gemini-cli` (driver with hooks), `http` (control API with a bearer token and server-sent events), `markdown` (board, telemetry), `slack`, `local`, `ssh`, `git` (worktree workspaces), `jsonl` (memory store).
+- **Batch adapters** for OpenRouter (inline requests, JSON schema response format) and Gemini batch mode (inline requests, operation polling), beside the Anthropic one.
+- **The generic CLI-agent driver** (`CliAgentDriver`) with the Claude CLI and the Gemini CLI as adapters.
+- **`harness` CLI**: `start`, `status`, `install --launchd | --systemd`.
+- `start(harness, options)` and `processResolver()` at the package root.
+
+### Changed
+
+- The provider SDKs (`@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/openai`) are optional peer dependencies loaded on first use.
+- Observed quota windows carry a kind: allowance windows feed utilization and the share; a saturated throttle window is a cooldown until its reset. A harness's share of an account is the utilization rise observed across its own calls, not a token budget.
+- The claude CLI driver's `runId` is only a file-name component; the handoff loop and the `maxContextTokens`, `handoffBufferTokens`, `isIncomplete` and `customTools` request fields are gone.
+
+### Removed
+
+- The 0.3.0 kernel: `H.account`, `H.model`, `H.agent`, `H.skill`, `H.head`, `startOrchestrator`, `HarnessStore`, `FlowEngine`, the `.harness/` store, `BOARD.md` and `TELEMETRY.md` as store writes, tickets and lessons files, `harness-dsl/plugins` (`gitWorktreeIsolation`, `fileLeaseGuard`, `stopCommandHook`), the mock and custom drivers, the `drizzle/` migrations.
+
+### Not verified live
+
+- The OpenRouter and Gemini batch adapters are verified against the providers' documented shapes, not against a live batch.
+- The Gemini CLI's hook enabling keys (`tools.enableHooks`, `hooks.enabled`) follow the documentation of an experimental feature; a guarded Gemini step has not run live.
+
 ## 0.3.0
 
 The core no longer names a provider, CLI, model, header, price, hook format, transcript format, port name or input field. Each lives behind an adapter with a first-party default. `test/unit/core-boundary.test.ts` enforces the boundary over the transitive imports of every core file. One known exception remains until 0.4.0: the Head's `.mcp.json` is Claude Code's format.

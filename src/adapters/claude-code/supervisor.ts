@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -12,6 +13,8 @@ export interface SupervisorOptions {
   readonly grants: readonly Grant[];
   readonly port?: number | PortRef;
 }
+
+const { version: PACKAGE_VERSION } = createRequire(import.meta.url)('../../../package.json') as { version: string };
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -62,7 +65,7 @@ export class SupervisorClient implements Client {
   }
 
   private mcpServer(api: ControlApi): McpServer {
-    const server = new McpServer({ name: `harness-${api.harness}`, version: '0.4.0' }, { capabilities: { tools: {} } });
+    const server = new McpServer({ name: `harness-${api.harness}`, version: PACKAGE_VERSION }, { capabilities: { tools: {} } });
     const tools = api.operations().map((operation) => ({ operation: operation.name, name: toolName(operation.name), ...objectSchema(operation.inputSchema) }));
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: tools.map((tool) => ({ name: tool.name, description: `${tool.operation} on harness "${api.harness}"`, inputSchema: tool.schema as { type: 'object'; [key: string]: unknown } })),

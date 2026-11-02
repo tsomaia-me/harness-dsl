@@ -1,245 +1,170 @@
 # `harness-dsl`
 
-Strongly-typed TypeScript orchestration DSL (`H.*`) for composing deterministic shell commands, schema-validated AI agent skills, reactive multi-account subscription/API pools, and an interactive Head MCP server.
+A TypeScript DSL for durable agent harnesses. You declare what work exists (kinds with states), who does it (roles in seats on model pools), how (flows as a tree of named steps: commands, seats, jobs, halts, loops), where it queues (lanes with retry, reactions and a scheduler), what watches it (triggers over the event stream, metrics folded from it), and who may touch it (clients with typed grants, observers). The engine records every effect on a ledger and replays from it: a harness that dies mid-step resumes the same attempt, reruns only what its `effect` allows, asks the driver about an agent that finished while it was down, and finds decisions that landed in the meantime.
 
 ---
 
-## Features
-
-- **Unified `Executable<TInput, TOutput>` Contract** — Deterministic commands (`H.command`), bound agent skills (`Agent.run(Skill)`), and sub-flows (`H.flow`) share a single Zod-validated interface and compose interchangeably across all flow combinators.
-- **Strongly-Typed Flow Combinators** — `.step()`, `.when()`, `.branch()`, `.parallel()`, `.loop()`, `.batch()`, `.haltIf()`, `.onError()`, and `.finally()` propagate step output types through `ctx.steps` and `ctx.prev` at compile time.
-- **Reactive Multi-Account Quota Pools (`H.pool`)** — Pool multiple Claude CLI subscription accounts (`CLAUDE_CONFIG_DIR`) and API keys (`@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/openai`) with per-account and per-pool quota share ceilings (`maxQuotaShare`), provider-neutral quota windows (Claude 5h/7d, OpenAI requests/tokens, IETF `RateLimit-*`) read from headers and CLI rate-limit events, per-window thresholds via `.quotaPolicy()`, 429 cooldown failover, reserve thresholds, and API fallback.
-- **50% Discount Cloud Batching (`H.batch`)** — Automatically routes multi-item batch steps to the Anthropic Message Batches API (`/v1/messages/batches`) with prompt caching when backed by an `ai-sdk` Anthropic driver, or executes concurrently via `p-queue` for CLI/command steps.
-- **Process-Group & SSH Containment (`H.runner`)** — Local and agentless SSH runners (`ControlMaster` multiplexing + `setsid` process groups) with deterministic per-slot port allocation (`HARNESS_SLOT`, `PORT`, plus your own names through `slotEnv`), inactivity watchdogs, and remote CPU/disk pre-flight health checks.
-- **Scoped Institutional Memory (`.harness/lessons.jsonl`)** — Append-only JSONL lesson store with Jaccard similarity deduplication, filtered automatically by agent role and `picomatch` file globs before prompt injection.
-- **First-Party Plugins (`harness-dsl/plugins`)** — Git worktree isolation per run (`gitWorktreeIsolation`), cross-run exclusive file leases (`fileLeaseGuard`), and mechanical verification gates on agent completion (`stopCommandHook`).
-- **Streamable HTTP MCP Server (`H.head` & `startOrchestrator`)** — Exposes live queue, blocker resolution, ticket CRUD, lesson management, quota share controls, telemetry, and custom agent/command tools to your interactive Claude Code Head session over `/mcp`.
-
----
-
-## Installation
+## Install
 
 ```bash
 pnpm add harness-dsl zod
 ```
 
-Requires **Node.js >= 22**.
+Node.js 22 or later. The provider SDKs are optional peers, loaded the first time a preset creates a model: `@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/openai`. The Claude Code and Gemini CLI adapters need those CLIs installed and signed in.
 
 ---
 
 ## Quickstart
 
 ```ts
-import { H, startOrchestrator, z } from 'harness-dsl';
-import {
-  fileLeaseGuard,
-  gitWorktreeIsolation,
-  stopCommandHook,
-} from 'harness-dsl/plugins';
+// harness.ts
+import { H, processResolver, z } from 'harness-dsl';
+import { claudeCode } from 'harness-dsl/claude-code';
+import { local } from 'harness-dsl/local';
+import { markdown } from 'harness-dsl/markdown';
+import { sqlite } from 'harness-dsl/sqlite';
 
-const SubsPool = H.pool('claude-subs', [
-  H.account('sub-1', H.drivers.claudeCli({ configDir: '~/.claude' })).maxQuotaShare(0.5),
-  H.account('sub-2', H.drivers.claudeCli({ configDir: '~/.claude-2' })).maxQuotaShare(0.8),
-])
-  .strategy('drain-soonest-expiring')
-  .fallback(
-    H.account('api-fallback', H.drivers.aiSdk({ provider: 'anthropic', apiKeyEnv: 'ANTHROPIC_API_KEY' })),
-  );
+// Work: a kind with its states. Positions (pending, waiting, terminal) are declared, never inferred.
+const Open = H.state('Open', 'pending');
+const Done = H.terminal('Done', 'success');
+const Rejected = H.terminal('Rejected', 'failure');
+const Fix = H.kind('Fix')
+  .attributes(z.object({ id: z.string(), title: z.string() }))
+  .states(Open, Done, Rejected)
+  .key((a) => a.id)
+  .initial(Open);
 
-const Opus = H.model(SubsPool, 'claude-opus-4-6');
-const Sonnet = H.model(SubsPool, 'claude-sonnet-4-6');
+// Accounts draw on a quota partition shared by every harness that names it.
+const quota = sqlite.quota('claude', { path: '.harness/quota.sqlite' });
+const max = claudeCode.subscription('max', { token: H.env('CLAUDE_MAX_TOKEN'), quota });
+const sonnet = claudeCode.model('sonnet', { id: 'claude-sonnet-5-5' });
+const subs = H.pool('subs').accounts(max);
 
-const VerifyGate = H.command('verify-gate')
-  .input(z.any())
-  .output(z.object({ passed: z.boolean(), summary: z.string() }))
-  .run(async ({ ctx, exec }) => {
-    const res = await exec('pnpm typecheck && pnpm test', { cwd: ctx.workDir, reject: false });
-    return { passed: res.exitCode === 0, summary: res.all.slice(-2000) };
-  });
+// A role is a typed contract; a seat is role × model × pool.
+const builderRole = H.role('builder')
+  .input(z.object({ title: z.string() }))
+  .output(z.object({ summary: z.string() }))
+  .prompt((i) => `Fix: ${i.title}. Run the checks before you stop.`)
+  .intents('read', 'edit', 'run');
+const builder = H.seat('builder').role(builderRole).model(sonnet).pool(subs);
 
-const BuildSkill = H.skill('implement-ticket')
-  .input(z.object({ id: z.string(), instructions: z.string(), deficits: z.array(z.string()) }))
-  .output(
-    z.object({
-      status: z.enum(['READY', 'NEEDS_OWNER']),
-      question: z.string().optional(),
-      summary: z.string(),
-    }),
-  );
+// Commands run on a runner; `effect` says what a rerun after a crash may do.
+const runner = local.runner('local', { maxConcurrentSlots: 2 });
+const checks = H.command('checks').argv(['pnpm', 'test']).runner(runner).effect('repeatable');
+const approval = H.halt('approval').decision(z.object({ approved: z.boolean() }));
 
-const AuditSkill = H.skill('audit-ticket')
-  .input(z.object({ id: z.string(), summary: z.string() }))
-  .output(z.object({ approved: z.boolean(), deficits: z.array(z.string()) }));
+// A flow is a tree of named steps. Every step has an address the ledger memoises.
+const fix = H.flow('fix')
+  .input(Fix.attributeSchema!)
+  .step('build', builder, (ctx) => ({ title: ctx.unit.attributes.title }))
+  .step('checks', checks)
+  .halt('approval', approval, { ask: (ctx) => `merge ${ctx.unit.attributes.id}?`, timeout: { afterMinutes: 240, decide: () => ({ approved: false }) } })
+  .exit('rejected', (ctx) => !ctx.steps.approval.approved)
+  .exit('done');
 
-const Builder = H.agent('builder')
-  .model(Opus)
-  .maxContextTokens(250_000)
-  .prompt('Implement the ticket cleanly with tests.')
-  .tools(['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob'])
-  .use(fileLeaseGuard())
-  .use(stopCommandHook(VerifyGate));
+// A lane queues units of one kind through one flow and maps its exits to states.
+const fixes = H.lane('fixes', Fix)
+  .supply(H.operator)
+  .handler(fix, { exits: { done: Done, rejected: Rejected } })
+  .retry({ tries: 2, backoff: 'exponential', exhausted: Rejected })
+  .on(H.cancel, { enter: Rejected });
 
-const Auditor = H.agent('auditor')
-  .model(Sonnet)
-  .prompt('Audit the implementation against the ticket requirements.')
-  .tools(['Read', 'Grep', 'Glob', 'Bash']);
+export const harness = H.harness('demo')
+  .ledger(sqlite.ledger({ path: '.harness/ledger.sqlite' }))
+  .lanes(fixes)
+  .scheduler(H.scheduler('s').standard(fixes).wip(fixes, 1))
+  .clients(claudeCode.supervisor('owner', { port: 4100, grants: [H.ops.work.create, H.ops.work.read, H.ops.resolve(approval), H.ops.telemetry.read] }))
+  .observers(markdown.board('board', { path: '.harness/BOARD.md' }));
 
-const TicketFlow = H.flow('ticket-flow')
-  .input(z.object({ id: z.string(), instructions: z.string(), touches: z.array(z.string()) }))
-  .identify({ ticketId: (ticket) => ticket.id, touchedPaths: (ticket) => ticket.touches })
-  .use(gitWorktreeIsolation({ baseBranch: 'main', cleanupOnSuccess: true }))
-  .loop({
-    maxIterations: 3,
-    body: (round) =>
-      round
-        .step(
-          'build',
-          Builder.run(BuildSkill, (ctx) => ({
-            id: ctx.input.id,
-            instructions: ctx.input.instructions,
-            deficits: ctx.prev?.audit?.deficits ?? [],
-          })),
-        )
-        .haltIf(
-          (ctx) => ctx.steps.build.status === 'NEEDS_OWNER',
-          (ctx) => ({ reason: ctx.steps.build.question ?? 'Clarification needed' }),
-        )
-        .step(
-          'audit',
-          Auditor.run(AuditSkill, (ctx) => ({
-            id: ctx.input.id,
-            summary: ctx.steps.build.summary,
-          })),
-        ),
-    until: (ctx) => ctx.steps.audit.approved && ctx.steps.audit.deficits.length === 0,
-  });
-
-const Head = H.head()
-  .port(4100)
-  .capabilities([
-    'workflows:read',
-    'workflows:control',
-    'blockers:resolve',
-    'tickets:read',
-    'tickets:write',
-    'lessons:manage',
-    'accounts:manage',
-    'telemetry:read',
-    'runner:exec',
-  ])
-  .registerFlow(TicketFlow);
-
-const orchestrator = await startOrchestrator({
-  projectDir: process.cwd(),
-  head: Head,
-});
+export const drivers = [claudeCode.driver({ workDir: process.cwd() })];
+export const resolver = processResolver();
 ```
 
----
+```bash
+harness start ./harness.js          # validates, claims the ledger, serves the clients, ticks
+harness status ./harness.js         # the board in text
+harness install --launchd ./harness.js
+```
 
-## Core DSL Reference (`H.*`)
-
-### 1. Accounts, Pools & Models
-
-- **`H.drivers.claudeCli(opts)`**: Spawns `claude -p --output-format stream-json --json-schema` with isolated `configDir` (`CLAUDE_CONFIG_DIR`) or `CLAUDE_CODE_OAUTH_TOKEN`, automatic `--resume` on schema validation retry, 1-turn context-ceiling handoff extraction when `maxContextTokens - handoffBuffer` is reached, live 5h/7d windows from the CLI's `rate_limit_event`, and the CLI-reported cost as the subscription-equivalent value.
-- **`H.drivers.aiSdk(opts)`**: Calls any Vercel AI SDK model with structured output (`Output.object`). `provider` is `'anthropic' | 'openai' | 'google'` or your own `ProviderPreset` (`{ name, createModel, apiKeyEnv?, mapModelOptions?, rateLimits?, pricing?, createBatch? }`); `fetch`, `rateLimits` and `pricing` options override the preset. First-party presets map `cachePrefix`, `effort` and `thinkingBudget`, parse their provider's rate-limit headers, and price tokens from dated price lists. Anthropic Cloud Batch is on by default; `batch: false` turns it off, and `anthropicBatchAdapter({ ... })` configures `maxTokens`, `apiVersion`, `discount` and `structuredOutput`.
-- **`H.drivers.custom(opts)` / `H.drivers.mock(opts)`**: Custom or deterministic test drivers.
-- **`H.account(id, driver).maxQuotaShare(0..1)`**: Wraps a driver with a per-account quota ceiling.
-- **`H.account(id, driver).quotaPolicy({ thresholds?, defaultThreshold?, probeStalenessMs?, tokenBudget?, shareResetWindowId?, defaultCooldownMs? })`**: Overrides the driver's quota policy. Without a `tokenBudget`, project share is not derived from token use.
-- **`H.pool(id, accounts)`**:
-  - `.strategy('drain-soonest-expiring' | 'least-used' | 'round-robin' | 'priority')`
-  - `.maxQuotaShare(0..1)`
-  - `.reserve({ minFreeAccounts, maxBurstUtilization })`
-  - `.fallback(accountProvider)`
-- **`H.model(accountOrPool, modelId, options?)`**: Binds a model identifier and provider options (`{ effort, thinkingBudget, cachePrefix }`) to an account or pool. `.pricing(adapter)` overrides how its tokens are priced; a model no price list knows is recorded as unpriced.
-
-### 2. Runners & Commands
-
-- **`H.runner.local(opts?)`**: Concurrency-slotted local process runner with deterministic port allocation (`slotPortBase + slot * portsPerSlot`, default 10 ports per slot), `HARNESS_SLOT` / `PORT` plus `slotEnv(slot, ports)` names in each command's env, and process-tree kill on timeout or inactivity.
-- **`H.runner.ssh(id, opts)`**: Agentless remote SSH runner using OpenSSH `ControlMaster` multiplexing, remote `setsid` process groups, pre-flight CPU load and disk space checks (`RunnerLoadHighError`, `RunnerDiskLowError`), and `syncGitRef()` worktree pushing.
-- **`H.command(name)`**:
-  - `.input(zodSchema)` / `.output(zodSchema)`
-  - `.runner(runnerInstance)`
-  - `.envFrom('.env.file')`
-  - `.run(async ({ input, ctx, exec }) => output)`
-
-### 3. Skills & Agents
-
-- **`H.skill(name)`**:
-  - `.input(zodSchema)` / `.output(zodSchema)`
-  - `.prompt(templateOrFn)`
-  - `.assert(async (output, input) => { ... })` — Semantic assertion; throwing triggers an automatic in-session `--resume` retry with feedback.
-  - `.maxRetries(n)`
-- **`H.agent(name)`**:
-  - `.model(modelDef)`
-  - `.maxContextTokens(n)` / `.handoffBuffer(tokens)` (default 30_000) / `.maxHandoffs(n)` (default 3) / `.inactivityTimeoutMs(ms)`
-  - `.prompt(text)` / `.promptFile(filePath)`
-  - `.tools(['Read', 'Edit', ...])` — Built-in tool allowlist.
-  - `.tool(name, executable)` — Attaches any `Executable` (command, agent skill, or flow) as an MCP tool callable by the agent.
-  - `.use(plugin)` — Attaches hook plugins (`preTool: { intents, handle }` / `stop: { handle }`), delivered through the driver's `HookProtocol`. Each invocation registers its plugins with the orchestrator; an agent with plugins refuses to run on a driver without a hook protocol or outside `startOrchestrator`.
-  - `.run(skillDef, inputMapper?)` — Produces a `BoundAgentSkill` (`Executable<TInput, TOutput>`).
-
-### 4. Flow Combinators (`H.flow(name)`)
-
-- **`.input(zodSchema)`** — Validates flow input at entry.
-- **`.identify({ ticketId?, touchedPaths? })`** — Names which input values are the run's ticket id and touched paths (for lesson filtering).
-- **`.use(middleware)`** — Wraps the flow lifecycle (e.g., `gitWorktreeIsolation()`).
-- **`.step(name, executable, mapInput?)`** — Runs an executable and merges `{ [name]: TOutput }` into `ctx.steps`.
-- **`.when(predicate, subflowOrExecutable, mapInput?)`** — Conditional execution; subflow step outputs are typed as `Partial<...>`.
-- **`.branch(selector, branchesMap)`** — Keyed routing across executables or subflows; all branch outputs are merged as optional properties on `ctx.steps`.
-- **`.parallel(branchesMap)`** — Concurrent fan-out across executables and `H.when(...)` conditional branches.
-- **`.loop({ maxIterations, body, until })`** — Iterative convergence loop; exposes `ctx.prev` from the prior iteration and resets conditional step keys between iterations so stale values never bleed forward.
-- **`.batch(name, { items, execute, concurrency? })`** — Maps over an array of items via the driver's Cloud Batch adapter (Anthropic, 50% discount, when `items.length > 1`) or `p-queue`.
-- **`.haltIf(predicate, mapBlocker?)`** — Persists flow state to SQLite (`status = 'blocked'`), updates `.harness/BOARD.md`, and suspends until `blocker_resolve` is called via MCP or `store.resolveBlocker()`.
-- **`.onError(handler)` / `.finally(handler)`** — Error recovery and guaranteed cleanup hooks.
+A Claude Code session connects through the supervisor's `.mcp.json` (`claudeCode.session('owner', { endpoints: [supervisor] }).write(dir, resolver)`) and calls `work_create`, `halts_resolve`, `telemetry_read` as tools.
 
 ---
 
-## First-Party Plugins (`harness-dsl/plugins`)
+## Concepts
 
-| Plugin | Scope | Description |
-| :--- | :--- | :--- |
-| `gitWorktreeIsolation({ baseBranch?, worktreesDir?, cleanupOnSuccess? })` | Flow (`.use()`) | Creates an isolated git worktree (`harness/<runId>`) per flow run and removes it on completion. |
-| `fileLeaseGuard()` | Agent (`.use()`) | Subscribes to `file-write` tool events (Claude Code: `Edit`, `Write`, `MultiEdit`) and blocks writes to files leased by another active run. |
-| `stopCommandHook(commandDef, { mapInput?, verdict? })` | Agent (`.use()`) | Runs a verification `CommandDef` with `{ workDir }` when an agent attempts to stop and blocks completion with its `summary` if `passed === false`. A command with another input needs `mapInput`, and one with another output needs `verdict(output) => ({ allow, reason })`; both are enforced by the types. |
-
----
-
-## State, Memory & Markdown Projections
-
-`HarnessStore` manages all state under `<projectDir>/.harness/`:
-
-- **`.harness/runtime.db`** — SQLite WAL database (`workflow_runs`, `invocations`, `account_quotas`, `account_quota_windows`, `file_leases`, `head_sessions`), migrated forward with drizzle-kit migrations on open; a database from 0.2.0 is kept as `runtime.db.v0.bak` and a fresh one is created, and a database written by a newer harness-dsl is refused.
-- **`.harness/lessons.jsonl`** — Git-committed scoped lessons (`domain` / `behavioral`), automatically deduplicated by token similarity and injected into matching agents' system prompts.
-- **`.harness/tickets/*.md`** — Markdown tickets with YAML frontmatter parsed via `gray-matter`.
-- **`.harness/BOARD.md`** — Auto-rendered live dashboard with one column per quota window (utilization and reset countdown), active/blocked runs, context token usage, and open blockers.
-- **`.harness/TELEMETRY.md`** — Auto-rendered cost and token ledger with per-run breakdown and per-agent scorecard (first-pass rate, schema retries, actual API USD vs. subscription equivalent USD); unpriced models show `—`.
+- **Unit, kind, state, position.** A unit of work has a kind, a key, attributes and one state at a time. States declare their position (`pending`, `waiting`, `terminal` with a verdict); `active` is the running attempt. The scheduler and the board read positions, never kinds.
+- **Attempt and replay.** An attempt walks the flow tree. Every step output, decision, metric read, loop iteration and job handle is recorded under its address. On `start()` an open attempt is replayed from the top at no cost; the step that was running follows its `effect` (`repeatable`, `unrepeatable`, `external` with `detect`), a seat step asks the driver's `session`, a job is collected from its handle. A changed flow blocks the attempt with `definitionChanged`.
+- **Lane and demand.** A lane has a supplier (a webhook, a poll, the operator), a handler flow with an exit map, retry with a typed end state (`exhausted` terminal, or waiting with `reopenAfter`; none leaves the attempt blocked for a supervisor), reactions to signals (`update`, `rewind`, `enter`, gated `at` steps), a lease and a cost ceiling. The scheduler grants demand per tick: WIP, pause, expedite holds, fixed dates, aging, admission policies.
+- **Seat, pool, quota.** A seat is a role, a model (or a model policy, `distinct` across seats), and a pool of accounts with a drain policy and a fallback. Each account names a quota partition; every harness on it folds everyone's windows and cooldowns and its own share. A refused call rotates to the next account; none left blocks the step on `budget` until the soonest reset.
+- **Halts.** A halt is a typed question. It is asked at an address, resolved by a client whose grant names it, by a policy (`skip`), or by a clock (`timeout`); `escalate` runs an executable after a delay. A decision is recorded with its facets, so decision metrics slice without a join.
+- **Triggers and metrics.** Triggers consume ledger events once each (transitions, patterns, timers, steps, decisions, invocations, metric crossings with hysteresis per facet) and produce effects: create, signal, pause, resume, record, run. Metrics fold at read time with sample counts; a flow reads one through a `read` node.
+- **Memory.** Journals hold items in a store that never ranks; the journal's recall policy chooses by specificity, track record and similarity, and the choice rides on the invocation. Items a role records enter as candidates.
+- **Clients and observers.** A client serves the control API with the operations its grants name. An observer subscribes to the event stream; it is never a side effect of a write.
+- **Guards.** A guarded seat step leases the workspace areas the agent writes (through the agent's hook protocol) and runs a `beforeStop` check; a failing check blocks the stop with its output.
 
 ---
 
-## Head MCP Server Tools
+## The DSL, `H.*`
 
-When `startOrchestrator({ projectDir, head })` starts, it writes `.mcp.json` in `projectDir` and serves `/mcp` over Streamable HTTP:
+| Builder | Declares |
+| :-- | :-- |
+| `H.state(name, 'pending' \| 'waiting')`, `H.terminal(name, verdict)` | states with positions |
+| `H.kind(name).attributes(schema).states(...).key(fn).initial(state)` | a kind of work |
+| `H.signal(name).payload(schema)`, `H.cancel` | signals a lane reacts to |
+| `H.halt(name).decision(schema)` | a question with a typed decision |
+| `H.resource(name)`, `H.resources(name, values)`, `H.facet(name, values)` | lease targets and metric dimensions |
+| `H.role(name).input().output().prompt().intents(...)` | what a seat does |
+| `H.memory(name, trust)`, `H.journal(name, kind).store().recall(policy).readBy().recordedBy()` | memory |
+| `H.pool(name).accounts(...).drain(policy).fallback(account)` | accounts for seats |
+| `H.seat(name).role().model(model \| policy).pool()` | a role in a seat |
+| `H.command(name).input().output().argv(fn).runner(runner \| policy).acceptExitCodes().effect()` | a shell command |
+| `H.job(name, { submit, collect, pollEveryMinutes })`, `H.batch(name, seat)` | remote work collected later |
+| `H.flow(name).input().params().step().halt().read().spawn().wait().when().parallel().loop().exit()` | the tree |
+| `H.lane(name, kind).supply().handler(flow, { exits }).store().retry().lease().after().on(signal, reaction).ceiling()` | a queue |
+| `H.trigger(name).on(H.when.transition \| pattern \| timer \| step \| decision \| invocation \| crossing).do(fn)` | reactions to events |
+| `H.metric(name, source).samples(fn)` / `.amounts(fn)` | a rate or a total |
+| `H.policy.model \| account \| runner \| halt \| recall \| admit` | registered, recorded decisions |
+| `H.scheduler(name).standard().fixedDate().expedite().wip().aging().admit()` | demand |
+| `H.ops.*`, `H.operation(name, executable)` | grants and custom operations |
+| `H.harness(name).ledger().lanes().journals().triggers().metrics().scheduler().clients().observers().share(account, fraction)` | the whole |
 
-- **Always registered:** `harness_ground`, `harness_handoff`, plus any custom `.tool(name, executable)` registered on `H.head()`.
-- **`workflows:read`:** `workflow_status`, `workflow_inspect_run`
-- **`workflows:control`:** `workflow_start`, `workflow_pause`, `workflow_cancel`
-- **`blockers:resolve`:** `blocker_list`, `blocker_resolve`
-- **`tickets:read` / `tickets:write`:** `ticket_list`, `ticket_read`, `ticket_write`
-- **`lessons:manage`:** `lesson_list`, `lesson_add`, `lesson_widen`, `lesson_remove`
-- **`accounts:manage`:** `account_status`, `account_set_share`
-- **`telemetry:read`:** `telemetry_summary`, `telemetry_runs`
-- **`runner:exec`:** `runner_exec`
-
-The same server is every run's hook receiver: agent hooks post to `/internal/hook?invocation=<id>`. `H.head().headProtocol(protocol)` sets how the Head's own client reports tool events and transcripts (default Claude Code), and `.contextNoticeThreshold(tokens)` sets when the Head is told to call `harness_handoff`. `.mcp.json` and the Head's `PostToolUse` hook currently assume Claude Code.
+`validate(harness)` returns the problems `start()` would refuse on (22 rules: names, exits, states, retries, lanes, reactions, seats and pools, batches and hooks, workspaces, grants and halts, metrics, partitions, commands, triggers, loops, branches).
 
 ---
 
-## Development & Verification
+## Adapters
+
+| Import | Provides |
+| :-- | :-- |
+| `harness-dsl/sqlite` | `sqlite.ledger({ path })`, `sqlite.quota(name, { path })` |
+| `harness-dsl/claude-code` | `claudeCode.subscription`, `.model`, `.driver` (hooks, sessions), `.supervisor` (MCP), `.session` (`.mcp.json`) |
+| `harness-dsl/anthropic` | `anthropic.account`, `.model` (batch), `.driver` over the AI SDK with the Message Batches API |
+| `harness-dsl/google` | `google.account`, `.model` (batch), `.driver` over the AI SDK with Gemini batch mode |
+| `harness-dsl/openrouter` | `openrouter.account`, `.model` (batch), `.driver` over the OpenAI-compatible API with OpenRouter's batch endpoint |
+| `harness-dsl/gemini-cli` | `geminiCli.account`, `.model`, `.driver` (hooks, sessions) |
+| `harness-dsl/http` | `http.controlApi(name, { port, token, grants })`: `/operations`, `/operations/<name>`, `/events` |
+| `harness-dsl/markdown` | `markdown.board`, `markdown.telemetry` observers |
+| `harness-dsl/slack` | `slack.observer(name, { webhook })` |
+| `harness-dsl/local`, `harness-dsl/ssh` | `local.runner`, `ssh.host` runners with slots and ports |
+| `harness-dsl/git` | `git.worktree(name, { repo, root? })` workspaces, one worktree per attempt |
+| `harness-dsl/jsonl` | `jsonl.memoryStore(name, { path })` |
+| `harness-dsl/kernel` | the contracts a backend implements: `Ledger`, `QuotaPartition`, `Store`, `MemoryStore`, `Supplier`, `ModelDriver`, `RunnerBackend`, `WorkspaceBackend`, `Client`, `Observer`, `Resolver` |
+
+---
+
+## The control API
+
+Operations, each with a JSON schema a client publishes: `work.create | read | update | cancel | signal`, `attempts.recover`, `lanes.pause | resume`, `halts.resolve`, `memory.read | write | curate`, `telemetry.read`, `accounts.read | share`, and `custom.<name>` from `H.operation`. A client calls only what its grants name; `halts.resolve` only the halts its grant lists. Every write records who called it.
+
+---
+
+## Development
 
 ```bash
 pnpm typecheck
 pnpm build
 pnpm test
-node --env-file=.env ./node_modules/vitest/vitest.mjs run test/e2e
+pnpm db:generate   # a new ledger or quota migration after a schema change
 ```
+
+The core (`src/kernel`, `src/dsl`, `src/engine`) imports no adapter and names no provider; `test/unit/core-boundary.test.ts` enforces it.
