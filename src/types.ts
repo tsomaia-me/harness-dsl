@@ -61,9 +61,6 @@ export interface DriverInvokeRequest {
   readonly outputJsonSchema: Record<string, unknown>;
   readonly workDir: string;
   readonly allowedTools?: readonly string[];
-  readonly maxContextTokens?: number;
-  readonly handoffBufferTokens?: number;
-  readonly isIncomplete?: (structuredOutput: unknown) => boolean;
   readonly hookServerUrl?: string;
   readonly invocationId?: string;
   readonly hookSubscriptions?: HookSubscriptions;
@@ -80,10 +77,6 @@ export interface DriverInvokeResult {
   readonly rawText: string;
   readonly sessionId: string;
   readonly usage: TokenUsage;
-  readonly handoffRequested?: {
-    readonly summary: string;
-    readonly remainingWork: readonly string[];
-  };
   readonly quotaHint?: QuotaPatch;
 }
 

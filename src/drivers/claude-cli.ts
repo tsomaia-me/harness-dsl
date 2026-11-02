@@ -1,29 +1,14 @@
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
-import { DEFAULT_HANDOFF_BUFFER_TOKENS } from '../defaults.js';
 import { hookEndpointUrl } from '../hooks.js';
 import { anthropicPricing } from '../pricing/anthropic.js';
 import { claudeCodeHookProtocol } from '../protocols/claude-code.js';
-import { AccountUnavailableError, RateLimitedError } from './errors.js';
 import { ANTHROPIC_5H_WINDOW, ANTHROPIC_7D_WINDOW } from '../rate-limits/anthropic.js';
-import {
-  CLAUDE_CLI_AUTH_FAILURE_TEXT,
-  CLAUDE_CLI_RATE_LIMIT_TEXT,
-  parseRateLimitResetFromMessage,
-  readClaudeCliRateLimitEvent,
-} from '../rate-limits/claude-cli.js';
-import { InactivityTimeoutError, killProcessGroupAndTree } from '../runner.js';
-import type {
-  Driver,
-  DriverInvokeRequest,
-  DriverInvokeResult,
-  QuotaPatch,
-  QuotaPolicy,
-  TokenUsage,
-} from '../types.js';
+import { CLAUDE_CLI_AUTH_FAILURE_TEXT, CLAUDE_CLI_RATE_LIMIT_TEXT, parseRateLimitResetFromMessage, readClaudeCliRateLimitEvent } from '../rate-limits/claude-cli.js';
+import type { DriverInvokeRequest, QuotaPolicy } from '../types.js';
+import { CliAgentDriver, type CliAgentAdapter, type CliAgentState, type CliSpawnBridge } from './cli-agent.js';
 
 export const CLAUDE_SUBSCRIPTION_QUOTA_POLICY: Partial<QuotaPolicy> = {
   thresholds: { [ANTHROPIC_5H_WINDOW]: 0.95, [ANTHROPIC_7D_WINDOW]: 0.98 },
@@ -31,16 +16,7 @@ export const CLAUDE_SUBSCRIPTION_QUOTA_POLICY: Partial<QuotaPolicy> = {
   shareResetWindowId: ANTHROPIC_7D_WINDOW,
 };
 
-export interface ClaudeCliSpawnBridge {
-  (
-    args: readonly string[],
-    env: Record<string, string>,
-    cwd: string,
-    onLine: (line: string) => void,
-    inactivityTimeoutMs: number,
-    signal: AbortSignal,
-  ): Promise<{ exitCode: number; stderr: string }>;
-}
+export type ClaudeCliSpawnBridge = CliSpawnBridge;
 
 export interface ClaudeCliDriverOptions {
   readonly configDir?: string;
@@ -48,407 +24,99 @@ export interface ClaudeCliDriverOptions {
   readonly claudeBinary?: string;
   readonly env?: Record<string, string>;
   readonly spawnBridge?: ClaudeCliSpawnBridge;
-  readonly probeQuota?: (accountId: string) => Promise<QuotaPatch>;
 }
 
 function expandHome(filepath: string): string {
-  if (filepath.startsWith('~/')) {
-    return path.join(homedir(), filepath.slice(2));
-  }
-  return filepath;
+  return filepath.startsWith('~/') ? path.join(homedir(), filepath.slice(2)) : filepath;
 }
 
-const HANDOFF_JSON_SCHEMA = {
-  type: 'object',
-  properties: {
-    summary: { type: 'string' },
-    remainingWork: { type: 'array', items: { type: 'string' } },
-  },
-  required: ['summary', 'remainingWork'],
-  additionalProperties: false,
-};
-
-export class ClaudeCliDriver implements Driver {
-  public readonly kind = 'claude-cli';
-  public readonly configDir?: string;
-  private readonly oauthToken?: string;
-  public readonly claudeBinary: string;
-  private readonly extraEnv: Record<string, string>;
-  private readonly spawnBridge?: ClaudeCliSpawnBridge;
-  public readonly probeQuota?: (accountId: string) => Promise<QuotaPatch>;
-  public readonly quotaPolicy = CLAUDE_SUBSCRIPTION_QUOTA_POLICY;
-  public readonly hookProtocol = claudeCodeHookProtocol;
-
-  public constructor(opts?: ClaudeCliDriverOptions) {
-    this.configDir = opts?.configDir ? expandHome(opts.configDir) : undefined;
-    this.oauthToken = opts?.oauthToken;
-    this.claudeBinary = opts?.claudeBinary ?? 'claude';
-    this.extraEnv = opts?.env ?? {};
-    this.spawnBridge = opts?.spawnBridge;
-    this.probeQuota = opts?.probeQuota;
-  }
-
-  public buildCliArgs(req: DriverInvokeRequest, sessionId: string, settingsFilePath?: string): string[] {
-    const sessionFlags = req.resumeSession
-      ? ['--resume', sessionId]
-      : ['--session-id', sessionId];
-
-    const args: string[] = [
-      '-p',
-      '--model',
-      req.modelId,
-      ...sessionFlags,
-      '--output-format',
-      'stream-json',
-      '--verbose',
-      '--json-schema',
-      JSON.stringify(req.outputJsonSchema),
-    ];
-
-    if (req.systemPrompt.trim().length > 0 && !req.resumeSession) {
-      args.push('--append-system-prompt', req.systemPrompt);
-    }
-
-    if (req.allowedTools && req.allowedTools.length > 0) {
-      args.push('--allowedTools', req.allowedTools.join(','));
-    }
-
-    if (settingsFilePath) {
-      args.push('--settings', settingsFilePath);
-    }
-
-    args.push('--strict-mcp-config', req.userPrompt);
-    return args;
-  }
-
-  public async invoke(req: DriverInvokeRequest): Promise<DriverInvokeResult> {
-    const sessionId = req.sessionId ?? randomUUID();
-    let settingsFilePath: string | undefined;
-
-    const subscriptions = req.hookSubscriptions;
-    if (
-      req.hookServerUrl &&
-      req.invocationId &&
-      subscriptions &&
-      (subscriptions.preToolIntents.length > 0 || subscriptions.stop)
-    ) {
-      const settingsDir = path.join(tmpdir(), 'harness-cli-settings');
-      mkdirSync(settingsDir, { recursive: true });
-      settingsFilePath = path.join(
-        settingsDir,
-        `settings-${req.runId}-${req.stepName}-${randomUUID()}.json`,
-      );
-      const settingsPayload = claudeCodeHookProtocol.buildSettings(
-        hookEndpointUrl(req.hookServerUrl, req.invocationId),
-        subscriptions,
-      );
-      writeFileSync(settingsFilePath, JSON.stringify(settingsPayload, null, 2), 'utf8');
-    }
-
-    const args = this.buildCliArgs(req, sessionId, settingsFilePath);
-    const env: Record<string, string> = {
-      ...this.extraEnv,
-    };
-    if (this.configDir && this.configDir !== path.join(homedir(), '.claude')) {
-      env.CLAUDE_CONFIG_DIR = this.configDir;
-    }
-    if (this.oauthToken) {
-      env.CLAUDE_CODE_OAUTH_TOKEN = this.oauthToken;
-    }
-
-    let inputTokens = 0;
-    let cachedInputTokens = 0;
-    let cacheWriteTokens = 0;
-    let outputTokens = 0;
-    let structuredOutput: unknown = undefined;
-    let rawText = '';
-    let handoffTriggered = false;
-    let reportedCostUsd: number | null = null;
-    let latestQuota: QuotaPatch = {};
-    let rejectedUntilMs: number | null = null;
-    let turnRateLimited = false;
-    let authFailed = false;
-    let errorText = '';
-
-    const onLine = (line: string) => {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('{')) return;
-      try {
-        const event = JSON.parse(trimmed) as Record<string, any>;
-        const usage = event.message?.usage ?? event.usage;
-        if (usage && typeof usage === 'object') {
-          const inTok = Number(usage.input_tokens ?? 0);
-          const cacheCreate = Number(usage.cache_creation_input_tokens ?? 0);
-          const cacheRead = Number(usage.cache_read_input_tokens ?? 0);
-          const outTok = Number(usage.output_tokens ?? 0);
-          inputTokens = Math.max(inputTokens, inTok + cacheCreate + cacheRead);
-          cachedInputTokens = Math.max(cachedInputTokens, cacheRead);
-          cacheWriteTokens = Math.max(cacheWriteTokens, cacheCreate);
-          outputTokens = Math.max(outputTokens, outTok);
-
-          const totalContext = inTok + cacheCreate + cacheRead + outTok;
-          if (
-            event.type === 'assistant' &&
-            req.maxContextTokens &&
-            totalContext >= req.maxContextTokens - (req.handoffBufferTokens ?? DEFAULT_HANDOFF_BUFFER_TOKENS)
-          ) {
-            handoffTriggered = true;
-          }
-        }
-
-        if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
-          for (const block of event.message.content) {
-            if (block.type === 'text' && typeof block.text === 'string') {
-              rawText = block.text;
-            }
-          }
-        }
-
-        if (event.type === 'result') {
-          if (typeof event.total_cost_usd === 'number') {
-            reportedCostUsd = event.total_cost_usd;
-          }
-          if (event.structured_output !== undefined) {
-            structuredOutput = event.structured_output;
-          } else if (typeof event.result === 'string') {
-            rawText = event.result;
-            try {
-              structuredOutput = JSON.parse(event.result);
-            } catch (err) {
-              void err;
-            }
-          }
-        }
-
-        const rateLimitEvent = readClaudeCliRateLimitEvent(event);
-        if (rateLimitEvent) {
-          latestQuota = rateLimitEvent.quota;
-          rejectedUntilMs = rateLimitEvent.rejectedUntilMs;
-        }
-
-        if (event.type === 'error' || event.is_error === true) {
-          errorText = String(event.error?.message ?? event.result ?? '');
-          const authStatus = event.api_error_status === 401 || event.api_error_status === 403;
-          if (authStatus || CLAUDE_CLI_AUTH_FAILURE_TEXT.test(errorText)) {
-            authFailed = true;
-          } else if (event.api_error_status === 429 || CLAUDE_CLI_RATE_LIMIT_TEXT.test(errorText)) {
-            turnRateLimited = true;
-          }
-        }
-      } catch (err) {
-        void err;
-      }
-    };
-
-    try {
-      const bridge = this.spawnBridge ?? this.defaultSpawnBridge.bind(this);
-      const { exitCode, stderr } = await bridge(
-        args,
-        env,
-        req.workDir,
-        onLine,
-        req.inactivityTimeoutMs,
-        req.signal,
-      );
-
-      const failedWithoutOutput = exitCode !== 0 && structuredOutput === undefined;
-      if (authFailed || (failedWithoutOutput && CLAUDE_CLI_AUTH_FAILURE_TEXT.test(stderr))) {
-        throw new AccountUnavailableError(req.accountId, (errorText || stderr).trim());
-      }
-
-      const failedWithRateLimitText =
-        exitCode !== 0 && structuredOutput === undefined && CLAUDE_CLI_RATE_LIMIT_TEXT.test(stderr);
-      if (turnRateLimited || failedWithRateLimitText) {
-        const detail = errorText || stderr;
-        const cooldownUntilMs = rejectedUntilMs ?? parseRateLimitResetFromMessage(detail);
-        throw new RateLimitedError(
-          req.accountId,
-          `Rate limit reached on account ${req.accountId}: ${detail}`,
-          { ...latestQuota, ...(cooldownUntilMs !== null ? { cooldownUntilMs } : {}) },
-        );
-      }
-
-      if (exitCode !== 0 && structuredOutput === undefined) {
-        throw new Error(`claude CLI exited with code ${exitCode}: ${stderr || rawText}`);
-      }
-
-      if (structuredOutput === undefined && rawText.trim().startsWith('{')) {
-        structuredOutput = JSON.parse(rawText.trim());
-      }
-
-      const isIncompleteOutput = req.isIncomplete
-        ? req.isIncomplete(structuredOutput)
-        : structuredOutput === undefined;
-
-      let handoffRequested: { summary: string; remainingWork: readonly string[] } | undefined;
-
-      if (handoffTriggered && isIncompleteOutput) {
-        let extractedHandoff: { summary?: string; remainingWork?: string[] } | undefined;
-        const handoffArgs = [
-          '-p',
-          '--model',
-          req.modelId,
-          '--resume',
-          sessionId,
-          '--output-format',
-          'stream-json',
-          '--verbose',
-          '--json-schema',
-          JSON.stringify(HANDOFF_JSON_SCHEMA),
-          '--strict-mcp-config',
-          'Context ceiling reached. Summarize work completed so far and list remaining criteria as JSON { summary, remainingWork }.',
-        ];
-        try {
-          await bridge(
-            handoffArgs,
-            env,
-            req.workDir,
-            (line) => {
-              const trimmed = line.trim();
-              if (!trimmed.startsWith('{')) return;
-              try {
-                const ev = JSON.parse(trimmed) as Record<string, any>;
-                if (ev.type === 'result' && ev.structured_output && typeof ev.structured_output === 'object') {
-                  extractedHandoff = ev.structured_output;
-                }
-              } catch (err) {
-                void err;
-              }
-            },
-            req.inactivityTimeoutMs,
-            req.signal,
-          );
-        } catch (err) {
-          void err;
-        }
-
-        handoffRequested = {
-          summary:
-            typeof extractedHandoff?.summary === 'string' && extractedHandoff.summary.length > 0
-              ? extractedHandoff.summary
-              : rawText.slice(-1000) || 'Context ceiling reached',
-          remainingWork:
-            Array.isArray(extractedHandoff?.remainingWork) &&
-            extractedHandoff.remainingWork.length > 0
-              ? extractedHandoff.remainingWork.map(String)
-              : ['Continue remaining criteria in fresh session'],
-        };
-      }
-
-      const counts = { inputTokens, cachedInputTokens, cacheWriteTokens, outputTokens };
-      const usage: TokenUsage = {
-        ...counts,
-        actualCostUsd: 0,
-        equivalentCostUsd: req.pricing
-          ? req.pricing.estimate(req.modelId, counts, Date.now())
-          : (reportedCostUsd ?? anthropicPricing.estimate(req.modelId, counts, Date.now())),
-      };
-
+/** The Claude CLI as an agent adapter: `claude -p` with stream-json, a JSON schema, sessions and hook settings. */
+export function claudeCliAdapter(options: { readonly configDir?: string; readonly oauthToken?: string } = {}): CliAgentAdapter {
+  const configDir = options.configDir ? expandHome(options.configDir) : undefined;
+  return {
+    name: 'claude-cli',
+    binary: 'claude',
+    pricing: anthropicPricing,
+    quotaPolicy: CLAUDE_SUBSCRIPTION_QUOTA_POLICY,
+    prepaid: true,
+    stripInheritedEnv: configDir || options.oauthToken ? ['ANTHROPIC_API_KEY'] : [],
+    args(req, sessionId, settingsPath) {
+      const args = ['-p', '--model', req.modelId, ...(req.resumeSession ? ['--resume', sessionId] : ['--session-id', sessionId]), '--output-format', 'stream-json', '--verbose', '--json-schema', JSON.stringify(req.outputJsonSchema)];
+      if (req.systemPrompt.trim().length > 0 && !req.resumeSession) args.push('--append-system-prompt', req.systemPrompt);
+      if (req.allowedTools && req.allowedTools.length > 0) args.push('--allowedTools', req.allowedTools.join(','));
+      if (settingsPath) args.push('--settings', settingsPath);
+      args.push('--strict-mcp-config', req.userPrompt);
+      return args;
+    },
+    env() {
       return {
-        structuredOutput,
-        rawText,
-        sessionId,
-        usage,
-        handoffRequested,
-        quotaHint: latestQuota.windows ? latestQuota : undefined,
+        ...(configDir && configDir !== path.join(homedir(), '.claude') ? { CLAUDE_CONFIG_DIR: configDir } : {}),
+        ...(options.oauthToken ? { CLAUDE_CODE_OAUTH_TOKEN: options.oauthToken } : {}),
       };
-    } finally {
-      if (settingsFilePath) {
-        rmSync(settingsFilePath, { force: true });
+    },
+    event(event, state) {
+      const usage = event.message?.usage ?? event.usage;
+      if (usage && typeof usage === 'object') {
+        const input = Number(usage.input_tokens ?? 0);
+        const cacheCreate = Number(usage.cache_creation_input_tokens ?? 0);
+        const cacheRead = Number(usage.cache_read_input_tokens ?? 0);
+        state.inputTokens = Math.max(state.inputTokens, input + cacheCreate + cacheRead);
+        state.cachedInputTokens = Math.max(state.cachedInputTokens, cacheRead);
+        state.cacheWriteTokens = Math.max(state.cacheWriteTokens, cacheCreate);
+        state.outputTokens = Math.max(state.outputTokens, Number(usage.output_tokens ?? 0));
       }
-    }
-  }
-
-  private defaultSpawnBridge(
-    args: readonly string[],
-    env: Record<string, string>,
-    cwd: string,
-    onLine: (line: string) => void,
-    inactivityTimeoutMs: number,
-    signal: AbortSignal,
-  ): Promise<{ exitCode: number; stderr: string }> {
-    return new Promise((resolve, reject) => {
-      const baseEnv = { ...process.env };
-      if (
-        (this.configDir || env.CLAUDE_CONFIG_DIR || env.CLAUDE_CODE_OAUTH_TOKEN) &&
-        !this.extraEnv.ANTHROPIC_API_KEY
-      ) {
-        delete baseEnv.ANTHROPIC_API_KEY;
+      if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+        for (const block of event.message.content) if (block.type === 'text' && typeof block.text === 'string') state.rawText = block.text;
       }
-      const child = spawn(this.claudeBinary, args, {
-        cwd,
-        env: { ...baseEnv, ...env },
-        detached: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-
-      let buffer = '';
-      let stderr = '';
-      let settled = false;
-      let timer: NodeJS.Timeout | undefined;
-
-      const resetWatchdog = () => {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(async () => {
-          if (settled) return;
-          settled = true;
-          if (child.pid) await killProcessGroupAndTree(child.pid);
-          reject(new InactivityTimeoutError('claude -p', inactivityTimeoutMs, buffer));
-        }, inactivityTimeoutMs);
-      };
-
-      resetWatchdog();
-
-      const onAbort = async () => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        if (child.pid) await killProcessGroupAndTree(child.pid);
-        reject(new Error('Claude CLI invocation aborted'));
-      };
-
-      if (signal.aborted) {
-        void onAbort();
-        return;
+      if (event.type === 'result') {
+        if (typeof event.total_cost_usd === 'number') state.reportedCostUsd = event.total_cost_usd;
+        if (event.structured_output !== undefined) state.structuredOutput = event.structured_output;
+        else if (typeof event.result === 'string') {
+          state.rawText = event.result;
+          try {
+            state.structuredOutput = JSON.parse(event.result);
+          } catch (err) {
+            void err;
+          }
+        }
       }
-      signal.addEventListener('abort', () => void onAbort(), { once: true });
+      const rateLimitEvent = readClaudeCliRateLimitEvent(event);
+      if (rateLimitEvent) {
+        state.quota = rateLimitEvent.quota;
+        state.rejectedUntilMs = rateLimitEvent.rejectedUntilMs;
+      }
+      if (event.type === 'error' || event.is_error === true) {
+        state.errorText = String(event.error?.message ?? event.result ?? '');
+        const authStatus = event.api_error_status === 401 || event.api_error_status === 403;
+        if (authStatus || CLAUDE_CLI_AUTH_FAILURE_TEXT.test(state.errorText)) state.authFailed = true;
+        else if (event.api_error_status === 429 || CLAUDE_CLI_RATE_LIMIT_TEXT.test(state.errorText)) state.rateLimited = true;
+      }
+    },
+    ended(exitCode, stderr, state: CliAgentState) {
+      const failedWithoutOutput = exitCode !== 0 && state.structuredOutput === undefined;
+      if (failedWithoutOutput && CLAUDE_CLI_AUTH_FAILURE_TEXT.test(stderr)) state.authFailed = true;
+      if (failedWithoutOutput && CLAUDE_CLI_RATE_LIMIT_TEXT.test(stderr)) state.rateLimited = true;
+      if (state.rateLimited && state.rejectedUntilMs === null) state.rejectedUntilMs = parseRateLimitResetFromMessage(state.errorText || stderr);
+    },
+    placeHookSettings(req: DriverInvokeRequest, endpoint, subscriptions) {
+      const dir = path.join(tmpdir(), 'harness-cli-settings');
+      mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `settings-${req.runId}-${req.stepName}-${randomUUID()}.json`);
+      writeFileSync(file, JSON.stringify(claudeCodeHookProtocol.buildSettings(hookEndpointUrl(endpoint, req.invocationId!), subscriptions), null, 2), 'utf8');
+      return { path: file, cleanup: () => rmSync(file, { force: true }) };
+    },
+  };
+}
 
-      child.stdout?.on('data', (chunk: Buffer) => {
-        resetWatchdog();
-        buffer += chunk.toString('utf8');
-        let newlineIdx = buffer.indexOf('\n');
-        while (newlineIdx !== -1) {
-          const line = buffer.slice(0, newlineIdx);
-          buffer = buffer.slice(newlineIdx + 1);
-          onLine(line);
-          newlineIdx = buffer.indexOf('\n');
-        }
-      });
+export class ClaudeCliDriver extends CliAgentDriver {
+  public readonly configDir: string | undefined;
 
-      child.stderr?.on('data', (chunk: Buffer) => {
-        resetWatchdog();
-        stderr += chunk.toString('utf8');
-      });
-
-      child.on('error', (err) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        reject(err);
-      });
-
-      child.on('close', async (code) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        if (buffer.trim().length > 0) {
-          onLine(buffer);
-        }
-        if (child.pid) {
-          await killProcessGroupAndTree(child.pid);
-        }
-        resolve({ exitCode: code ?? 1, stderr });
-      });
+  public constructor(options: ClaudeCliDriverOptions = {}) {
+    super(claudeCliAdapter({ ...(options.configDir ? { configDir: options.configDir } : {}), ...(options.oauthToken ? { oauthToken: options.oauthToken } : {}) }), {
+      ...(options.claudeBinary ? { binary: options.claudeBinary } : {}),
+      ...(options.env ? { env: options.env } : {}),
+      ...(options.spawnBridge ? { spawnBridge: options.spawnBridge } : {}),
     });
+    this.configDir = options.configDir ? expandHome(options.configDir) : undefined;
   }
 }

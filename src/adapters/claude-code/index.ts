@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Intent } from '../../dsl/roles.js';
@@ -8,8 +6,8 @@ import type { GuardProtocol, Model, ModelDriver, ModelRequest, ModelResponse, Se
 import type { Account, QuotaPartition } from '../../kernel/quota.js';
 import type { EnvRef, JsonObject, Resolver } from '../../kernel/refs.js';
 import { claudeCodeHookProtocol } from '../../protocols/claude-code.js';
-import { parseWithDates, stringifyWithDates } from '../json-dates.js';
 import { DEFAULT_RATE_LIMIT_COOLDOWN_MS, DEFAULT_UNAVAILABLE_COOLDOWN_MS, envelopeSchema, refusalOf, sessionIdFor, systemPrompt, tokensOf, unpack, userPrompt, windowsOf } from '../model-calls.js';
+import { FinishedSessions } from '../sessions.js';
 import { SessionDef, type SessionOptions, SupervisorClient, type SupervisorOptions } from './supervisor.js';
 
 export { SessionDef, SupervisorClient, type SessionOptions, type SupervisorOptions };
@@ -58,11 +56,10 @@ export class ClaudeCodeDriver implements ModelDriver<'claude-code'> {
   public readonly hooks = true;
   public readonly guardProtocol = claudeCodeGuardProtocol;
   private readonly inners = new Map<string, ClaudeCliDriver>();
-  private readonly sessionDir: string;
+  private readonly sessions: FinishedSessions;
 
   public constructor(private readonly options: ClaudeCodeDriverOptions = {}) {
-    this.sessionDir = options.sessionDir ?? path.join(tmpdir(), 'harness-claude-code-sessions');
-    mkdirSync(this.sessionDir, { recursive: true });
+    this.sessions = new FinishedSessions(options.sessionDir ?? path.join(tmpdir(), 'harness-claude-code-sessions'));
   }
 
   public serves(account: Account): boolean {
@@ -81,10 +78,6 @@ export class ClaudeCodeDriver implements ModelDriver<'claude-code'> {
       this.inners.set(credential.name, inner);
     }
     return inner;
-  }
-
-  private sessionFile(key: string): string {
-    return path.join(this.sessionDir, `${createHash('sha256').update(key).digest('hex').slice(0, 32)}.json`);
   }
 
   public async invoke(request: ModelRequest, resolver: Resolver): Promise<ModelResponse> {
@@ -129,14 +122,12 @@ export class ClaudeCodeDriver implements ModelDriver<'claude-code'> {
       sessionId: result.sessionId,
       ...(windows.length > 0 ? { windows } : {}),
     };
-    writeFileSync(this.sessionFile(request.idempotencyKey), stringifyWithDates(response), 'utf8');
+    this.sessions.remember(request.idempotencyKey, response);
     return response;
   }
 
   public async session(idempotencyKey: string, _resolver: Resolver): Promise<SessionStatus> {
-    const file = this.sessionFile(idempotencyKey);
-    if (!existsSync(file)) return { status: 'lost' };
-    return { status: 'finished', response: parseWithDates<ModelResponse>(readFileSync(file, 'utf8')) };
+    return this.sessions.status(idempotencyKey);
   }
 }
 

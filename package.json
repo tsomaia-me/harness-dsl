@@ -67,6 +67,10 @@
     "./openrouter": {
       "types": "./dist/adapters/openrouter/index.d.ts",
       "default": "./dist/adapters/openrouter/index.js"
+    },
+    "./gemini-cli": {
+      "types": "./dist/adapters/gemini-cli/index.d.ts",
+      "default": "./dist/adapters/gemini-cli/index.js"
     }
   },
   "scripts": {
@@ -114,5 +118,8 @@
     "@ai-sdk/openai": {
       "optional": true
     }
+  },
+  "bin": {
+    "harness": "./dist/cli.js"
   }
 }
