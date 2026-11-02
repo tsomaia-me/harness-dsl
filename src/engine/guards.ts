@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
@@ -25,6 +26,22 @@ export interface GuardHost {
 }
 
 /** The whole body of a request, as the hook server and the HTTP clients read it. */
+/** The path with its symlinks resolved as far as it exists: a file not yet written resolves through its nearest existing parent. */
+function realPath(target: string): string {
+  let probe = target;
+  const trailing: string[] = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync(probe), ...trailing.reverse());
+    } catch {
+      const parent = path.dirname(probe);
+      if (parent === probe) return target;
+      trailing.push(path.basename(probe));
+      probe = parent;
+    }
+  }
+}
+
 export function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -118,9 +135,10 @@ export class GuardServer {
     return context.protocol.formatDecision(event, decision);
   }
 
+  /** The area a path falls in; both paths are resolved through their symlinks, since an agent reports real paths. */
   private areaOf(context: GuardContext, filePath: string): string | undefined {
     const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(context.workspacePath, filePath);
-    const relative = path.relative(context.workspacePath, absolute).split(path.sep).join('/');
+    const relative = path.relative(realPath(context.workspacePath), realPath(absolute)).split(path.sep).join('/');
     for (const [resource, globs] of Object.entries(context.areas)) {
       if (picomatch.isMatch(relative, [...globs])) return resource;
     }

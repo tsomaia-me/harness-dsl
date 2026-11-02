@@ -3,7 +3,7 @@ import { APICallError, generateText, jsonSchema, type LanguageModel, Output, Ret
 import { anthropicPreset } from '../presets/anthropic.js';
 import { googlePreset } from '../presets/google.js';
 import { openaiPreset } from '../presets/openai.js';
-import { AccountUnavailableError, RateLimitedError } from './errors.js';
+import { ACCOUNT_CANNOT_PAY, AccountUnavailableError, RateLimitedError } from './errors.js';
 import { ietfRateLimits } from '../rate-limits/ietf.js';
 import type {
   BatchAdapter,
@@ -169,6 +169,9 @@ export class AiSdkDriver implements Driver {
         APICallError.isInstance(apiError) && (apiError.statusCode === 401 || apiError.statusCode === 403);
       if (authFailed) {
         throw new AccountUnavailableError(req.accountId, apiError.message);
+      }
+      if (APICallError.isInstance(apiError) && ACCOUNT_CANNOT_PAY.test(`${apiError.message} ${apiError.responseBody ?? ''}`)) {
+        throw new AccountUnavailableError(req.accountId, apiError.responseBody?.slice(0, 500) || apiError.message);
       }
       if (APICallError.isInstance(apiError) && apiError.statusCode === 429) {
         throw new RateLimitedError(

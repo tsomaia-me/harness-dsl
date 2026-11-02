@@ -1,4 +1,5 @@
 import type { BatchAdapter, BatchItemResult, PricingAdapter } from '../types.js';
+import { fetchForPoll } from './transport.js';
 
 export interface AnthropicBatchOptions {
   readonly apiKey: () => string;
@@ -103,7 +104,8 @@ export function anthropicBatchAdapter(opts: AnthropicBatchOptions): BatchAdapter
     },
 
     poll: async (batchId) => {
-      const statusRes = await fetchFn(`${base}/messages/batches/${batchId}`, { headers: headers() });
+      const statusRes = await fetchForPoll(fetchFn, `${base}/messages/batches/${batchId}`, { headers: headers() });
+      if (!statusRes) return { status: 'running' };
       if (!statusRes.ok) {
         throw new Error(`Anthropic Batch poll failed (${statusRes.status})`);
       }
@@ -120,7 +122,8 @@ export function anthropicBatchAdapter(opts: AnthropicBatchOptions): BatchAdapter
 
       const pricing = pricingByBatch.get(batchId) ?? opts.pricing;
       pricingByBatch.delete(batchId);
-      const resultsRes = await fetchFn(statusData.results_url, { headers: headers() });
+      const resultsRes = await fetchForPoll(fetchFn, statusData.results_url, { headers: headers() });
+      if (!resultsRes) return { status: 'running' };
       const results: BatchItemResult[] = (await resultsRes.text())
         .split('\n')
         .filter((line) => line.trim().length > 0)

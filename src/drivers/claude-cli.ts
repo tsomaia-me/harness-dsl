@@ -8,6 +8,7 @@ import { claudeCodeHookProtocol } from '../protocols/claude-code.js';
 import { CLAUDE_CLI_AUTH_FAILURE_TEXT, CLAUDE_CLI_RATE_LIMIT_TEXT, parseRateLimitResetFromMessage, readClaudeCliRateLimitEvent } from '../rate-limits/claude-cli.js';
 import type { DriverInvokeRequest } from '../types.js';
 import { CliAgentDriver, type CliAgentAdapter, type CliAgentState, type CliSpawnBridge } from './cli-agent.js';
+import { ACCOUNT_CANNOT_PAY } from './errors.js';
 
 export type ClaudeCliSpawnBridge = CliSpawnBridge;
 
@@ -18,14 +19,18 @@ export interface ClaudeCliDriverOptions {
   readonly spawnBridge?: ClaudeCliSpawnBridge;
 }
 
-/** The Claude CLI as an agent adapter: `claude -p` with stream-json, a JSON schema, sessions and hook settings. */
+/**
+ * The Claude CLI as an agent adapter: `claude -p` with stream-json, a JSON schema, sessions and hook
+ * settings. A subscription signs in through the CLI's own login or the account's OAuth token, never
+ * through an API key the harness process happens to carry: that key would be billed instead.
+ */
 export function claudeCliAdapter(options: { readonly oauthToken?: string } = {}): CliAgentAdapter {
   return {
     name: 'claude-cli',
     binary: 'claude',
     pricing: anthropicPricing,
     prepaid: true,
-    stripInheritedEnv: options.oauthToken ? ['ANTHROPIC_API_KEY'] : [],
+    stripInheritedEnv: ['ANTHROPIC_API_KEY'],
     args(req, sessionId, settingsPath) {
       const args = ['-p', '--model', req.modelId, ...(req.resumeSession ? ['--resume', sessionId] : ['--session-id', sessionId]), '--output-format', 'stream-json', '--verbose', '--json-schema', JSON.stringify(req.outputJsonSchema)];
       if (req.systemPrompt.trim().length > 0 && !req.resumeSession) args.push('--append-system-prompt', req.systemPrompt);
@@ -71,13 +76,13 @@ export function claudeCliAdapter(options: { readonly oauthToken?: string } = {})
       if (event.type === 'error' || event.is_error === true) {
         state.errorText = String(event.error?.message ?? event.result ?? '');
         const authStatus = event.api_error_status === 401 || event.api_error_status === 403;
-        if (authStatus || CLAUDE_CLI_AUTH_FAILURE_TEXT.test(state.errorText)) state.authFailed = true;
+        if (authStatus || CLAUDE_CLI_AUTH_FAILURE_TEXT.test(state.errorText) || ACCOUNT_CANNOT_PAY.test(state.errorText)) state.authFailed = true;
         else if (event.api_error_status === 429 || CLAUDE_CLI_RATE_LIMIT_TEXT.test(state.errorText)) state.rateLimited = true;
       }
     },
     ended(exitCode, stderr, state: CliAgentState) {
       const failedWithoutOutput = exitCode !== 0 && state.structuredOutput === undefined;
-      if (failedWithoutOutput && CLAUDE_CLI_AUTH_FAILURE_TEXT.test(stderr)) state.authFailed = true;
+      if (failedWithoutOutput && (CLAUDE_CLI_AUTH_FAILURE_TEXT.test(stderr) || ACCOUNT_CANNOT_PAY.test(stderr))) state.authFailed = true;
       if (failedWithoutOutput && CLAUDE_CLI_RATE_LIMIT_TEXT.test(stderr)) state.rateLimited = true;
       if (state.rateLimited && state.rejectedUntilMs === null) state.rejectedUntilMs = parseRateLimitResetFromMessage(state.errorText || stderr);
     },

@@ -8,8 +8,10 @@ import { processResolver } from '../../src/engine/resolver.js';
 import type { LedgerEvent } from '../../src/kernel/index.js';
 
 const live = process.env.HARNESS_LIVE === '1';
+/** `HARNESS_TRIAGE_PROVIDER=google` runs the classifier on the Gemini API instead of the Anthropic one. */
+const provider = process.env.HARNESS_TRIAGE_PROVIDER === 'google' ? 'google' : 'anthropic';
 
-describe.skipIf(!live)('support triage on the Anthropic API', () => {
+describe.skipIf(!live)(`support triage on the ${provider} API`, () => {
   const dirs: string[] = [];
   afterEach(() => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -19,7 +21,7 @@ describe.skipIf(!live)('support triage on the Anthropic API', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'harness-triage-'));
     dirs.push(dir);
     process.env.HARNESS_OPS_TOKEN = 'e2e-token';
-    const { harness, drivers, ops } = triageHarness({ stateDir: dir });
+    const { harness, drivers, ops } = triageHarness({ stateDir: dir, provider });
     const runtime = new Runtime({ harness, drivers, resolver: processResolver(), holder: 'e2e' });
     await runtime.start();
     try {
@@ -29,6 +31,9 @@ describe.skipIf(!live)('support triage on the Anthropic API', () => {
       const easy = await create('c1', 'sam@example.com', 'Hi, where can I download my invoice for last month? No rush.');
       const angry = await create('c2', 'kim@example.com', 'You charged me twice for the same order and nobody answers. I want my money back today.');
       for (let round = 0; round < 3; round += 1) await runtime.tick();
+      const trail: unknown[] = [];
+      for await (const { event } of runtime.ledger.read({ types: ['attemptEnded', 'invocation', 'attemptBlocked'] })) trail.push(event.type === 'attemptEnded' ? [event.type, event.outcome, event.detail] : event.type === 'invocation' ? [event.type, event.executable, event.ok, event.costUsd] : event.type === 'attemptBlocked' ? [event.type, event.on, event.detail] : [event.type]);
+      process.stdout.write(`triage trail: ${JSON.stringify(trail)}\n`);
 
       const easyRecord = (await runtime.find(easy))!;
       const angryRecord = (await runtime.find(angry))!;

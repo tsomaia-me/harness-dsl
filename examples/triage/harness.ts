@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { z } from 'zod';
 import { anthropic } from '../../src/adapters/anthropic/index.js';
+import { google } from '../../src/adapters/google/index.js';
 import { http } from '../../src/adapters/http/index.js';
 import { markdown } from '../../src/adapters/markdown/index.js';
 import { sqlite } from '../../src/adapters/sqlite/index.js';
@@ -14,9 +15,13 @@ import type { ModelDriver } from '../../src/kernel/index.js';
  */
 export interface TriageHarnessOptions {
   readonly stateDir: string;
+  /** The API the classifier runs on; the Anthropic API unless told otherwise. */
+  readonly provider?: 'anthropic' | 'google';
   readonly model?: string;
   readonly opsToken?: string;
 }
+
+const DEFAULT_MODEL = { anthropic: 'claude-haiku-5-5', google: 'gemini-3.5-flash-lite' } as const;
 
 export const New = H.state('New', 'pending');
 export const Answered = H.terminal('Answered', 'success');
@@ -35,9 +40,11 @@ export const classifierRole = H.role('classifier')
   .intents();
 
 export function triageHarness(options: TriageHarnessOptions) {
-  const quota = sqlite.quota('anthropic', { path: path.join(options.stateDir, 'quota.sqlite') });
-  const api = anthropic.account('api', { apiKey: H.env('ANTHROPIC_API_KEY'), quota });
-  const model = anthropic.model('classifier-model', { id: options.model ?? 'claude-haiku-5-5' });
+  const provider = options.provider ?? 'anthropic';
+  const quota = sqlite.quota(provider, { path: path.join(options.stateDir, 'quota.sqlite') });
+  const modelId = options.model ?? DEFAULT_MODEL[provider];
+  const api = provider === 'google' ? google.account('api', { apiKey: H.env('GEMINI_API_KEY'), quota }) : anthropic.account('api', { apiKey: H.env('ANTHROPIC_API_KEY'), quota });
+  const model = provider === 'google' ? google.model('classifier-model', { id: modelId }) : anthropic.model('classifier-model', { id: modelId });
   const classifier = H.seat('classifier').role(classifierRole).model(model).pool(H.pool('api').accounts(api));
 
   const Urgency = H.facet('urgency', ['low', 'high']);
@@ -83,6 +90,6 @@ export function triageHarness(options: TriageHarnessOptions) {
     .clients(ops)
     .observers(markdown.board('board', { path: path.join(options.stateDir, 'BOARD.md') }), markdown.telemetry('telemetry', { path: path.join(options.stateDir, 'TELEMETRY.md') }));
 
-  const drivers: readonly ModelDriver[] = [anthropic.driver()];
+  const drivers: readonly ModelDriver[] = [provider === 'google' ? google.driver() : anthropic.driver()];
   return { harness, drivers, ops, conversations, send, Category };
 }

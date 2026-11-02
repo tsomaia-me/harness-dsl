@@ -90,6 +90,27 @@ describe('the OpenRouter batch adapter', () => {
     expect(done.results?.[0]?.usage.actualCostUsd).toBe(0);
   });
 
+  it('reports a batch as running when a poll cannot reach the provider', async () => {
+    const unreachable = (async () => {
+      throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } });
+    }) as typeof fetch;
+    expect.soft(await openrouterBatchAdapter({ apiKey: () => 'k', fetch: unreachable, pricing: tenCentsPerCall }).poll('batch_01')).toEqual({ status: 'running' });
+    expect.soft(await googleBatchAdapter({ apiKey: () => 'k', fetch: unreachable, pricing: tenCentsPerCall }).poll('batches/g1')).toEqual({ status: 'running' });
+    const refused = (async () => new Response('nope', { status: 500 })) as typeof fetch;
+    await expect(openrouterBatchAdapter({ apiKey: () => 'k', fetch: refused, pricing: tenCentsPerCall }).poll('batch_01')).rejects.toThrow(/500/);
+  });
+
+  it('treats a 404 right after creation as a batch still running', async () => {
+    let polled = 0;
+    const fetchFn = (async (url: string | URL) => {
+      if (String(url).endsWith('/batches/batch_01')) return polled++ === 0 ? json({ error: { message: 'Not Found', code: 404 } }, 404) : json(completed);
+      return json({ id: 'batch_01', object: 'batch', status: 'validating' }, 202);
+    }) as typeof fetch;
+    const batch = openrouterBatchAdapter({ apiKey: () => 'or-key', fetch: fetchFn, pricing: tenCentsPerCall });
+    expect.soft(await batch.poll('batch_01')).toEqual({ status: 'running' });
+    expect((await batch.poll('batch_01')).status).toBe('completed');
+  });
+
   it('reports a failed or expired batch', async () => {
     const { fetchFn } = openrouterFetch([{ id: 'batch_01', status: 'failed', error: { message: 'no batch endpoint for this model' } }]);
     const batch = openrouterBatchAdapter({ apiKey: () => 'or-key', fetch: fetchFn, pricing: tenCentsPerCall });

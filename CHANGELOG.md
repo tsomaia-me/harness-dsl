@@ -25,10 +25,17 @@ A new kernel. A flow is a declared tree of named steps, never an async function;
 
 - The 0.3.0 kernel: `H.account`, `H.model`, `H.agent`, `H.skill`, `H.head`, `startOrchestrator`, `HarnessStore`, `FlowEngine`, the `.harness/` store, `BOARD.md` and `TELEMETRY.md` as store writes, tickets and lessons files, `harness-dsl/plugins` (`gitWorktreeIsolation`, `fileLeaseGuard`, `stopCommandHook`), the mock and custom drivers, the `drizzle/` migrations.
 
+### Verified live (2026-11-02)
+
+- The coding loop on the signed-in Claude Code CLI: a guarded builder in a git worktree (area lease taken through the `PreToolUse` hook), the checks as a command, approval over the HTTP control API, the fix landed, board and telemetry written.
+- Support triage on the Gemini API: classification, a halt skipped by policy, a human decision over HTTP, the decisions folded into a metric.
+- OpenRouter batches: submission, polling and collection, each item charged its share of the batch's reported cost. Right after creation the batch answers 404 for a moment, which the adapter reads as running; a poll that cannot reach the provider leaves the batch running.
+
 ### Not verified live
 
-- The OpenRouter and Gemini batch adapters are verified against the providers' documented shapes, not against a live batch.
+- The Gemini batch endpoint answered `FAILED_PRECONDITION` to every request from the available key, a minimal one included; the adapter is verified against the documented shapes only.
 - The Gemini CLI's hook enabling keys (`tools.enableHooks`, `hooks.enabled`) follow the documentation of an experimental feature; a guarded Gemini step has not run live.
+- Triage on the Anthropic API: the available key had no credit; the call path is the same AI SDK driver the Gemini run used.
 
 ## 0.3.0
 

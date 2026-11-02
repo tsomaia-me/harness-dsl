@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -8,7 +8,9 @@ import { defineRunner, defineWorkspace, H, type FlowDef } from '../../src/dsl/in
 import { flowVersion } from '../../src/engine/address.js';
 import { Runtime } from '../../src/engine/runtime.js';
 import { AccountRefusedError } from '../../src/kernel/index.js';
+import { claudeCodeGuardProtocol } from '../../src/adapters/claude-code/index.js';
 import { ControlError } from '../../src/engine/control.js';
+import { GuardServer } from '../../src/engine/guards.js';
 import type { LedgerEvent, ModelDriver, ModelRequest, ModelResponse, Observer, Resolver, RunnerBackend, SequencedEvent, Store } from '../../src/kernel/index.js';
 import { eventsOf, fakeAccount, fakeClient, fakeModel, recordingQuota, ScriptedDriver } from './scenarios/doubles.js';
 
@@ -553,6 +555,24 @@ describe('the engine after the cold review', () => {
     expect.soft(await eventsOf(ledger, 'attemptInterrupted')).toHaveLength(1);
     const outputs = (await eventsOf(ledger, 'stepEnded')) as Event<'stepEnded'>[];
     expect(outputs.map((event) => event.output)).toEqual([{ verdict: 'after approval' }]);
+  });
+
+  it('the guard matches a write by its real path when the workspace is reached through a symlink', async () => {
+    const real = path.join(dir, 'real');
+    mkdirSync(path.join(real, 'src'), { recursive: true });
+    const link = path.join(dir, 'link');
+    symlinkSync(real, link);
+    const leases: string[] = [];
+    const server = new GuardServer({ takeLease: async (_attemptId, resource) => {
+          leases.push(resource);
+          return true;
+        }, runCheck: async () => ({ ok: true, detail: '' }) }, 0);
+    server.register('inv', { attemptId: 'attempt-1', seat: 'builder', protocol: claudeCodeGuardProtocol, workspacePath: link, areas: { 'area:src': ['src/**'], 'area:test': ['test/**'] }, leases: true });
+    const inside = await server.handle('inv', { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: path.join(real, 'src', 'new.ts'), content: 'x' } });
+    const outside = await server.handle('inv', { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: path.join(real, 'README.md'), content: 'x' } });
+    expect.soft(inside).toEqual({});
+    expect.soft(outside).toEqual({});
+    expect(leases).toEqual(['area:src']);
   });
 
   it('releases the workspace when the attempt ends and refuses to continue a command whose output it cannot fabricate', async () => {

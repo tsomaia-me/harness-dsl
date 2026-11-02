@@ -138,6 +138,7 @@ describe('the claude-code adapter', () => {
   it.each([
     { label: 'a rate limit with its reset', stderr: 'Error 429: Rate limit reached, resets in 5 minutes', refusal: 'rateLimited', untilMs: 5 * 60_000 },
     { label: 'an expired login', stderr: 'Error: not logged in, please run /login', refusal: 'unavailable', untilMs: 15 * 60_000 },
+    { label: 'an account that cannot pay', stderr: 'Credit balance is too low', refusal: 'unavailable', untilMs: 15 * 60_000 },
   ])('turns $label into an account refusal with a cooldown', async ({ stderr, refusal, untilMs }) => {
     const { spawnBridge } = bridge([], { exitCode: 1, stderr });
     const driver = claudeCode.driver({ spawnBridge, workDir: dir, sessionDir: path.join(dir, 'sessions') });
@@ -200,6 +201,14 @@ describe('the anthropic adapter', () => {
     expect.soft(error).toBeInstanceOf(AccountRefusedError);
     expect.soft((error as AccountRefusedError).refusal).toBe('rateLimited');
     expect((error as AccountRefusedError).until.getTime()).toBeGreaterThanOrEqual(before + 120_000 - 1_000);
+  });
+
+  it('turns an account that cannot pay into an unavailable refusal, not a failed step', async () => {
+    const { fetchFn } = messagesFetch('Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.', {}, 400);
+    const driver = anthropic.driver({ fetch: fetchFn });
+    const error = await driver.invoke(request(account, opus.id), resolver).catch((err: unknown) => err);
+    expect.soft(error).toBeInstanceOf(AccountRefusedError);
+    expect((error as AccountRefusedError).refusal).toBe('unavailable');
   });
 
   it('submits a batch with indexed custom ids and collects the results in request order', async () => {

@@ -43,6 +43,9 @@ describe.skipIf(!live)('the coding loop on the signed-in Claude Code CLI', () =>
       expect(created.unitId).toMatch(/^unit-/);
 
       await runtime.tick();
+      const trail: unknown[] = [];
+      for await (const { event } of runtime.ledger.read({ types: ['attemptEnded', 'invocation', 'attemptBlocked'] })) trail.push(event.type === 'attemptEnded' ? [event.type, event.outcome, event.detail] : event.type === 'invocation' ? [event.type, event.executable, event.ok, event.costUsd] : event.type === 'attemptBlocked' ? [event.type, event.on, event.detail] : [event.type]);
+      process.stdout.write(`coding trail: ${JSON.stringify(trail)}\n`);
       const record = (await runtime.find(created.unitId))!;
       expect.soft(record.unit.attempt).toMatchObject({ status: 'blocked', blockedOn: 'decision', halt: 'approval' });
 

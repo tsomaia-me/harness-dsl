@@ -1,4 +1,5 @@
 import type { BatchAdapter, BatchItemResult, PricingAdapter } from '../types.js';
+import { fetchForPoll } from './transport.js';
 
 export interface OpenRouterBatchOptions {
   readonly apiKey: () => string;
@@ -65,7 +66,9 @@ export function openrouterBatchAdapter(opts: OpenRouterBatchOptions): BatchAdapt
     },
 
     poll: async (batchId) => {
-      const res = await fetchFn(`${base}/batches/${batchId}`, { headers: headers() });
+      const res = await fetchForPoll(fetchFn, `${base}/batches/${batchId}`, { headers: headers() });
+      // A batch just created answers 404 for a moment before it is listed; it is running, not gone (seen live 2026-11-02).
+      if (!res || res.status === 404) return { status: 'running' };
       if (!res.ok) throw new Error(`OpenRouter batch poll failed (${res.status})`);
       const data = (await res.json()) as { status: string; usage?: { cost?: number }; results?: readonly Record<string, any>[] | null };
       if (FAILED.has(data.status)) return { status: 'failed' };

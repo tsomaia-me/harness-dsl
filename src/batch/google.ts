@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { BatchAdapter, BatchItemResult, PricingAdapter } from '../types.js';
+import { fetchForPoll } from './transport.js';
 
 export interface GoogleBatchOptions {
   readonly apiKey: () => string;
@@ -66,7 +67,8 @@ export function googleBatchAdapter(opts: GoogleBatchOptions): BatchAdapter {
     },
 
     poll: async (batchId) => {
-      const res = await fetchFn(`${base}/${batchId}`, { headers: headers() });
+      const res = await fetchForPoll(fetchFn, `${base}/${batchId}`, { headers: headers() });
+      if (!res) return { status: 'running' };
       if (!res.ok) throw new Error(`Gemini batch poll failed (${res.status})`);
       const data = (await res.json()) as { done?: boolean; error?: unknown; metadata?: { state?: string }; state?: string; response?: Record<string, any> };
       const state = data.metadata?.state ?? data.state ?? '';
