@@ -39,7 +39,7 @@ function define<I>(name: string, input: z.ZodType<I>, run: (runtime: Runtime, in
 /** Every built-in operation, in the order a client lists them. */
 export const OPERATIONS: readonly Operation[] = [
   define('work.create', z.object({ lane: z.string(), attributes: z.record(z.string(), z.unknown()) }), async (runtime, input, by) => {
-    const unitId = await runtime.createUnit(runtime.laneNamed(input.lane), runtime.attributesFor(input.lane, input.attributes), { source: by });
+    const unitId = await runtime.createUnit(runtime.lane(input.lane), runtime.attributesFor(input.lane, input.attributes), { source: by });
     const result: Json = unitId ? { unitId } : { skipped: true };
     return result;
   }),
@@ -67,8 +67,8 @@ export const OPERATIONS: readonly Operation[] = [
     return { delivered: true };
   }),
   define('work.signal', z.object({ lane: z.string(), key: z.string(), signal: z.string(), payload: z.unknown() }), async (runtime, input, by) => {
-    await runtime.deliverSignal(input.lane, input.key, input.signal, (input.payload ?? null) as Json, by);
-    return { delivered: true };
+    const delivered = await runtime.deliverSignal(input.lane, input.key, input.signal, runtime.payloadFor(input.lane, input.signal, input.payload), by);
+    return { delivered };
   }),
   define('attempts.recover', z.object({ unitId: z.string(), action: z.enum(['restartFromTop', 'abandon', 'continue']) }), async (runtime, input, by) => {
     await runtime.recover(input.unitId, input.action, by);
@@ -83,7 +83,7 @@ export const OPERATIONS: readonly Operation[] = [
     return { paused: false };
   }),
   define('halts.resolve', z.object({ unitId: z.string(), decision: z.unknown() }), async (runtime, input, by) => {
-    const outcome = await runtime.resolveHalt(input.unitId, (input.decision ?? null) as Json, by);
+    const outcome = await runtime.resolveHalt(input.unitId, await runtime.decisionFor(input.unitId, input.decision), by);
     return { outcome: jsonOf({ kind: outcome.kind, ...('exit' in outcome ? { exit: outcome.exit } : {}), ...('step' in outcome ? { step: outcome.step } : {}), ...('on' in outcome ? { on: outcome.on } : {}), ...('ask' in outcome ? { ask: outcome.ask } : {}), ...('facets' in outcome ? { facets: outcome.facets } : {}), ...('detail' in outcome ? { detail: outcome.detail } : {}), ...('error' in outcome ? { error: outcome.error } : {}) }) };
   }),
   define('memory.read', z.object({ journal: z.string(), status: z.array(memoryStatus).optional() }), async (runtime, input) => {
@@ -105,7 +105,6 @@ export const OPERATIONS: readonly Operation[] = [
         },
         ...(input.status ? { status: input.status } : {}),
       },
-      by,
     );
     return { id };
   }),

@@ -27,10 +27,11 @@ export async function computeDemand(runtime: Runtime): Promise<readonly Granted[
     laneNames.reduce((count, name) => count + (byLane.get(name) ?? []).filter((record) => record.unit.attempt?.status === 'running').length, 0);
   const open = (name: string): boolean => (byLane.get(name) ?? []).some((record) => record.unit.position !== 'terminal');
   const paused = runtime.pausedLanes();
+  const held = runtime.heldUnits();
 
-  const held = new Set<string>();
+  const heldLanes = new Set<string>();
   for (const { lane, holds } of scheduler.expedites) {
-    if (open(lane.name)) for (const hold of holds) held.add(hold.name);
+    if (open(lane.name)) for (const hold of holds) heldLanes.add(hold.name);
   }
 
   const capacity = new Map<string, number>();
@@ -47,7 +48,7 @@ export async function computeDemand(runtime: Runtime): Promise<readonly Granted[
 
   const granted: Granted[] = [];
   for (const { lane, serviceClass, due } of ordered) {
-    if (paused.has(lane.name) || held.has(lane.name)) continue;
+    if (paused.has(lane.name) || heldLanes.has(lane.name)) continue;
     const group = groups.get(lane.name);
     const key = group ? group.lanes.join('|') : lane.name;
     const used = capacity.get(key) ?? running(group ? group.lanes : [lane.name]);
@@ -56,7 +57,7 @@ export async function computeDemand(runtime: Runtime): Promise<readonly Granted[
     const aging = scheduler.agings.find((entry) => entry.lane.name === lane.name);
     const admit = scheduler.admits.find((entry) => entry.lane.name === lane.name);
     const candidates = (byLane.get(lane.name) ?? [])
-      .filter((record) => record.unit.position === 'pending' && record.unit.attempt === undefined && (record.notBefore === undefined || record.notBefore.getTime() <= now.getTime()))
+      .filter((record) => record.unit.position === 'pending' && record.unit.attempt === undefined && !held.has(record.unit.id) && (record.notBefore === undefined || record.notBefore.getTime() <= now.getTime()))
       .map((record) => ({ record, starved: aging !== undefined && now.getTime() - record.unit.createdAt.getTime() >= aging.afterMinutes * 60_000 }))
       .sort((a, b) => {
         if (a.starved !== b.starved) return a.starved ? -1 : 1;

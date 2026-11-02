@@ -1,21 +1,4 @@
-import type {
-  Client,
-  Grant,
-  Ledger,
-  LedgerEvent,
-  MemoryItem,
-  MemoryStore,
-  Model,
-  ModelDriver,
-  ModelRequest,
-  ModelResponse,
-  Observer,
-  QuotaPartition,
-  RunnerBackend,
-  Store,
-  Supplier,
-  WorkspaceBackend,
-} from '../../../src/kernel/index.js';
+import type { Client, Grant, Ledger, LedgerEvent, MemoryItem, MemoryStore, Model, ModelDriver, ModelRequest, ModelResponse, Observer, QuotaEvent, QuotaPartition, RunnerBackend, Store, Supplier, WorkspaceBackend } from '../../../src/kernel/index.js';
 import type { Account } from '../../../src/kernel/quota.js';
 import { defineRunner, defineWorkspace, type RunnerDef, type WorkspaceDef } from '../../../src/dsl/index.js';
 
@@ -39,6 +22,23 @@ export function fakeLedger(): Ledger {
 
 export function fakeQuota(name: string): QuotaPartition {
   return { name, join: async () => ({ accepted: true }), append: async () => undefined, read: async function* () {}, close: () => undefined };
+}
+
+/** A partition that keeps what the engine appends, so a test can read usage back. */
+export function recordingQuota(name: string): QuotaPartition & { readonly events: QuotaEvent[] } {
+  const events: QuotaEvent[] = [];
+  return {
+    name,
+    events,
+    join: async () => ({ accepted: true }),
+    append: async (batch) => {
+      events.push(...batch);
+    },
+    read: async function* (query) {
+      for (const event of events) if (query.accounts.includes(event.account) && event.at >= query.since) yield event;
+    },
+    close: () => undefined,
+  };
 }
 
 export function fakeAccount<D extends string>(name: string, driver: D, quota: QuotaPartition): Account<D> {

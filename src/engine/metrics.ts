@@ -48,6 +48,7 @@ function matchesDimensions(sample: Sample | Amount, query: Dimensions): boolean 
 
 export class LedgerMetrics implements Metrics {
   private events: LedgerEvent[] = [];
+  private seqs: number[] = [];
   private units = new Map<string, UnitRecord>();
   private lanesByUnit = new Map<string, string>();
   private loadedSeq = 0;
@@ -66,6 +67,7 @@ export class LedgerMetrics implements Metrics {
   public async refresh(): Promise<void> {
     for await (const { seq, event } of this.ledger.read({ afterSeq: this.loadedSeq })) {
       this.events.push(event);
+      this.seqs.push(seq);
       this.loadedSeq = seq;
       if (event.type === 'unitCreated') this.lanesByUnit.set(event.unitId, event.lane);
     }
@@ -274,9 +276,8 @@ export class LedgerMetrics implements Metrics {
     const spec = source.spec;
     const blockedAt = new Map<string, Date>();
     const modelsBySeat = new Map<string, string>();
-    let seq = 0;
-    for (const event of this.events) {
-      seq += 1;
+    for (const [index, event] of this.events.entries()) {
+      const seq = this.seqs[index]!;
       if (event.type === 'invocation' && event.seat && event.model) modelsBySeat.set(event.seat, event.model);
       if (event.type === 'attemptBlocked' && event.on === 'decision') blockedAt.set(`${event.attemptId}:${event.step}`, event.at);
       switch (spec.on) {

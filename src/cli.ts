@@ -29,7 +29,7 @@ export const USAGE = [
   'usage:',
   '  harness start <module> [--tick <ms>] [--hooks-port <port>]',
   '  harness status <module> [--lane <name>]',
-  '  harness install --launchd|--systemd <module> [--name <label>] [--dir <folder>]',
+  '  harness install --launchd|--systemd <module> [--name <label>] [--dir <folder>] [--log-dir <folder>]',
   '',
   'The module is a JavaScript file exporting `harness` (the definition), `drivers`, and optionally',
   '`resolver`, `ports`, `hooks` and `tickMs`.',
@@ -70,9 +70,17 @@ export async function loadModule(file: string): Promise<HarnessModule> {
   return module as HarnessModule;
 }
 
+function numberOption(options: Command['options'], name: string): number | undefined {
+  const raw = options[name];
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (raw === true || !Number.isFinite(value) || value < 0) throw new Error(`--${name} needs a number, not "${String(raw)}"`);
+  return value;
+}
+
 export function runtimeOptions(module: HarnessModule, options: Command['options']): RuntimeOptions {
-  const hooksPort = typeof options['hooks-port'] === 'string' ? Number(options['hooks-port']) : undefined;
-  const tick = typeof options.tick === 'string' ? Number(options.tick) : undefined;
+  const hooksPort = numberOption(options, 'hooks-port');
+  const tick = numberOption(options, 'tick');
   return {
     harness: module.harness,
     drivers: module.drivers,

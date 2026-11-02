@@ -102,7 +102,10 @@ export interface ModelRequest {
   readonly outputSchema: Json;
   readonly workspacePath?: string;
   readonly idempotencyKey: string;
-  readonly resume?: { readonly sessionId: string; readonly halt: string; readonly decision: Json };
+  /** The decision on a halt this call raised; `sessionId` when the driver kept a session to resume. */
+  readonly resume?: { readonly sessionId?: string; readonly halt: string; readonly decision: Json };
+  /** Aborted when the attempt is cancelled; a driver stops the agent and may throw. */
+  readonly cancel?: AbortSignal;
   /** Set on a guarded step: the agent's hooks post to `endpoint` with `?invocation=<invocation>`. */
   readonly guard?: { readonly endpoint: string; readonly invocation: string; readonly leases: boolean; readonly stop: boolean };
 }
@@ -116,6 +119,8 @@ export interface ModelResponse {
   readonly recorded?: readonly { readonly journal: string; readonly text: string; readonly when: StoredScope }[];
   readonly cooldownUntil?: Date;
   readonly windows?: readonly ObservedWindow[];
+  /** What the call would have cost at list price when `costUsd` is a prepaid plan's zero. */
+  readonly equivalentUsd?: number;
 }
 
 export type SessionStatus =

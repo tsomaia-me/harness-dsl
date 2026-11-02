@@ -324,6 +324,9 @@ export class SqliteLedger implements Ledger {
         return;
       case 'attemptRewound':
         this.db.update(units).set({ cursorStep: event.to, cursorIteration: 0, attemptStep: event.to }).where(eq(units.attemptId, event.attemptId)).run();
+        for (const step of event.superseded ?? []) {
+          this.db.delete(stepOutputs).where(and(eq(stepOutputs.attemptId, event.attemptId), sql`${stepOutputs.address} LIKE ${`${step.replace(/[\\%_]/g, '\\$&')}@%`} ESCAPE '\\'`)).run();
+        }
         return;
       case 'attemptEnded': {
         const row = this.unitOfAttempt(event.attemptId);

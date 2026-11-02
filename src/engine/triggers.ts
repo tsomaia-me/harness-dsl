@@ -24,6 +24,7 @@ export class TriggerEngine {
   private readonly streaks = new Map<string, Streak>();
   private readonly bands = new Map<string, { inside: boolean }>();
   private readonly timers = new Map<string, TimerMemo>();
+  private readonly fired = new Set<string>();
   private primed = false;
 
   public constructor(
@@ -48,6 +49,7 @@ export class TriggerEngine {
     for (const { seq, event } of history) {
       this.remember(event);
       if (event.type === 'transition' && seq <= this.cursor) await this.trackStreak(event);
+      if (event.type === 'triggerFired' && event.sourceSeq > this.cursor) this.fired.add(`${event.trigger}:${event.sourceSeq}:${event.consequence}:${event.targetId}`);
     }
     this.primed = true;
   }
@@ -185,7 +187,7 @@ export class TriggerEngine {
         }
         continue;
       }
-      if (existing?.state === 'armed' && existing.fireAtMs === fireAt.getTime()) continue;
+      if (existing && existing.state !== 'cleared' && existing.fireAtMs === fireAt.getTime()) continue;
       await this.runtime.append([
         { type: 'timerSet', timerId, unitId, owner: `trigger:${trigger.name}`, fireAt, reason: existing?.state === 'armed' ? 'moved' : 'armed', ...(existing?.state === 'armed' ? { previousFireAt: new Date(existing.fireAtMs) } : {}), at },
       ]);
@@ -251,21 +253,26 @@ export class TriggerEngine {
     }
   }
 
+  /** Consequences of one source event, each once: a firing already on the ledger is not repeated after a crash (design §5.9). */
   private async consequences(trigger: AnyTrigger, sourceSeq: number, event: unknown): Promise<void> {
     const produced = trigger.consequence!(event as never, actions);
     const effects: readonly Effect[] = produced === undefined ? [] : Array.isArray(produced) ? (produced as readonly Effect[]) : [produced as Effect];
     const at = this.runtime.now();
+    const done = (consequence: string, targetId: string): boolean => this.fired.has(`${trigger.name}:${sourceSeq}:${consequence}:${targetId}`);
     for (const effect of effects) {
+      const target = effect.effect === 'create' ? effect.lane.name : effect.effect === 'signal' ? effect.key : effect.effect === 'record' ? effect.journal.name : effect.effect === 'run' ? effect.exec.name : effect.lane.name;
+      if (done(effect.effect, target)) continue;
       switch (effect.effect) {
         case 'create': {
           const created = await this.runtime.createUnit(effect.lane, effect.attrs, { source: `trigger:${trigger.name}` });
-          await this.runtime.append([{ type: 'triggerFired', trigger: trigger.name, sourceSeq, consequence: 'create', targetId: created ?? effect.lane.name, result: created ? 'applied' : 'deduped', at }]);
+          await this.runtime.append([{ type: 'triggerFired', trigger: trigger.name, sourceSeq, consequence: 'create', targetId: effect.lane.name, result: created ? 'applied' : 'deduped', at }]);
           break;
         }
-        case 'signal':
-          await this.runtime.deliverSignal(effect.lane.name, effect.key, effect.signal.name, effect.payload as Json, `trigger:${trigger.name}`);
-          await this.runtime.append([{ type: 'triggerFired', trigger: trigger.name, sourceSeq, consequence: 'signal', targetId: effect.key, result: 'applied', at }]);
+        case 'signal': {
+          const delivered = await this.runtime.deliverSignal(effect.lane.name, effect.key, effect.signal.name, effect.payload as Json, `trigger:${trigger.name}`);
+          await this.runtime.append([{ type: 'triggerFired', trigger: trigger.name, sourceSeq, consequence: 'signal', targetId: effect.key, result: delivered ? 'applied' : 'deduped', at }]);
           break;
+        }
         case 'pause':
           await this.runtime.append([
             { type: 'lanePaused', lane: effect.lane.name, reason: effect.reason, by: `trigger:${trigger.name}`, at },
@@ -279,7 +286,7 @@ export class TriggerEngine {
           ]);
           break;
         case 'record':
-          await this.runtime.recordMemory(effect.journal, effect.draft, `trigger:${trigger.name}`);
+          await this.runtime.recordMemory(effect.journal, effect.draft);
           await this.runtime.append([{ type: 'triggerFired', trigger: trigger.name, sourceSeq, consequence: 'record', targetId: effect.journal.name, result: 'applied', at }]);
           break;
         case 'run':

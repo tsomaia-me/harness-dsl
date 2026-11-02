@@ -29,6 +29,10 @@ function visit(nodes: readonly FlowNode[], path: string, found: SeatStep[]): voi
       for (const [name, branch] of Object.entries(node.branches)) {
         const exec = 'exec' in branch ? branch.exec : branch;
         if (exec.entity === 'seat') found.push({ seat: exec as AnySeat, path: `${here}/${name}`, guarded: false });
+        if (exec.entity === 'job') {
+          const batchOf = (exec as JobDef<unknown, unknown>).batchOf;
+          if (batchOf) found.push({ seat: batchOf, path: `${here}/${name}`, guarded: false });
+        }
       }
     }
     if (node.type === 'when' || node.type === 'loop') visit(node.nodes, here, found);

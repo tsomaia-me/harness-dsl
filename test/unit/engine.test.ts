@@ -12,6 +12,9 @@ import { defineRunner } from '../../src/dsl/index.js';
 
 class PowerOff extends Error {}
 
+/** Set by a double at the moment the harness "dies": the next clock read throws, before any ledger write. */
+let powerOffPending = false;
+
 class ScriptedRunner implements RunnerBackend {
   public readonly calls: string[] = [];
   public readonly crashOnce = new Set<string>();
@@ -21,7 +24,7 @@ class ScriptedRunner implements RunnerBackend {
     this.calls.push(name);
     if (this.crashOnce.has(name)) {
       this.crashOnce.delete(name);
-      throw new PowerOff(`power off during ${name}`);
+      powerOffPending = true;
     }
     const script = this.scripts[name];
     if (!script) return { exitCode: 127, stdout: '', stderr: `no script ${name}`, durationMs: 1 };
@@ -36,8 +39,6 @@ class ScriptedDriver implements ModelDriver<'test'> {
   public readonly requests: ModelRequest[] = [];
   public readonly crashOnce = new Set<string>();
   public readonly finished = new Map<string, ModelResponse>();
-  /** Set when the agent finished but the harness dies before recording it: the next clock read throws. */
-  public powerOffPending = false;
   public constructor(private readonly respond: (request: ModelRequest) => ModelResponse) {}
   public serves() {
     return true;
@@ -48,7 +49,7 @@ class ScriptedDriver implements ModelDriver<'test'> {
     if (this.crashOnce.has(request.seat)) {
       this.crashOnce.delete(request.seat);
       this.finished.set(request.idempotencyKey, response);
-      this.powerOffPending = true;
+      powerOffPending = true;
     }
     return response;
   }
@@ -129,9 +130,9 @@ describe('the engine over the ledger', () => {
   let driver: ScriptedDriver;
   let clock: Date;
   const now = () => {
-    if (driver.powerOffPending) {
-      driver.powerOffPending = false;
-      throw new PowerOff('power off after the agent finished, before the harness recorded it');
+    if (powerOffPending) {
+      powerOffPending = false;
+      throw new PowerOff('power off before the harness recorded what just finished');
     }
     return clock;
   };
@@ -215,7 +216,7 @@ describe('the engine over the ledger', () => {
     const attemptId = (await a.record(unitId)).unit.attempt!.id;
     expect(runner.calls).toEqual(['build', 'announce']);
 
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await a.stop();
     const b = runtime('b');
     await b.start();
     expect((await b.record(unitId)).unit.attempt).toMatchObject({ id: attemptId, status: 'blocked', blockedOn: 'interrupted' });
@@ -236,13 +237,12 @@ describe('the engine over the ledger', () => {
     const unitId = await startRelease(a);
     runner.crashOnce.add('build');
     await expect(a.startAttempt(unitId)).rejects.toBeInstanceOf(PowerOff);
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await a.stop();
     const b = runtime('b', { ttl: 200 });
     driver.crashOnce.add('reviewer');
     await expect(b.start()).rejects.toBeInstanceOf(PowerOff);
     expect(runner.calls).toEqual(['build', 'build', 'announce']);
     expect(driver.requests).toHaveLength(1);
-    await new Promise((resolve) => setTimeout(resolve, 250));
     const c = runtime('c');
     await c.start();
     expect((await c.record(unitId)).unit.attempt).toMatchObject({ status: 'blocked', blockedOn: 'decision', step: 'approval' });
@@ -280,7 +280,7 @@ describe('the engine over the ledger', () => {
     const b = runtime('b', { extraStep: true });
     await b.start();
     const outcome = await b.resumeAttempt(unitId);
-    expect(outcome).toMatchObject({ kind: 'blocked', on: 'interrupted', detail: 'definitionChanged' });
+    expect(outcome).toMatchObject({ kind: 'blocked', on: 'definitionChanged' });
     const blocked = (await events({ attemptBlocked: true })).filter((e) => e.type === 'attemptBlocked' && e.on === 'definitionChanged');
     expect(blocked).toHaveLength(1);
     expect(runner.calls).toEqual(['build', 'announce']);
