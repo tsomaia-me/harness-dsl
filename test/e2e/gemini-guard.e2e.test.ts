@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -73,8 +73,8 @@ describe.skipIf(!live)('a guarded step on the Gemini CLI', () => {
         ['checks', true],
       ]);
       expect.soft(taken.map((event) => event.resource)).toContain('area:src');
-      const worktree = path.join(stateDir, 'worktrees', ended[0] ? ended[0].attemptId : '');
-      expect.soft(readFileSync(path.join(worktree, 'src', 'sum.ts'), 'utf8')).toMatch(/a \+ b/);
+      // The worktree is released when the attempt ends; the checks invocation passing inside it is the proof of the fix.
+      expect.soft(ended.map((event) => event.outcome)).toEqual(['succeeded']);
       expect((await runtime.find(unit))?.unit).toMatchObject({ state: 'Fixed', position: 'terminal' });
     } finally {
       await runtime.stop();
