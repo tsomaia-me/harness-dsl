@@ -51,7 +51,8 @@ export type LedgerEvent =
   | { readonly type: 'expediteHold'; readonly lane: string; readonly heldBy: string; readonly released: boolean; readonly at: Date }
   | { readonly type: 'orderHeld'; readonly unitId: string; readonly predecessorKey: string; readonly reason: string; readonly at: Date }
   | { readonly type: 'leaseTaken'; readonly attemptId: string; readonly resource: string; readonly mode: LeaseMode; readonly waitedMs: number; readonly at: Date }
-  | { readonly type: 'leaseReleased'; readonly attemptId: string; readonly resource: string; readonly at: Date };
+  | { readonly type: 'leaseReleased'; readonly attemptId: string; readonly resource: string; readonly at: Date }
+  | { readonly type: 'triggersProcessed'; readonly upToSeq: number; readonly at: Date };
 
 export type LedgerEventType = LedgerEvent['type'];
 

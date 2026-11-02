@@ -9,15 +9,22 @@ import { validate } from '../dsl/validate.js';
 import type { Ledger, LedgerEvent, Metrics, Model, ModelDriver, Resolver, State, UnitRecord } from '../kernel/index.js';
 import type { Account, AccountState } from '../kernel/quota.js';
 import type { Json, JsonObject } from '../kernel/refs.js';
+import type { CommandDef } from '../dsl/commands.js';
+import type { Executable } from '../dsl/executables.js';
+import type { JournalDef, MemoryDraft } from '../dsl/memory.js';
 import { flowVersion } from './address.js';
+import { computeDemand } from './demand.js';
 import { buildMemo } from './memo.js';
+import { LedgerMetrics } from './metrics.js';
+import { startSuppliers } from './supply.js';
+import { TriggerEngine } from './triggers.js';
 import { walk, type WalkOutcome } from './walker.js';
 
 export interface RuntimeOptions {
   readonly harness: HarnessDef;
   readonly drivers: readonly ModelDriver[];
   readonly resolver: Resolver;
-  readonly metrics: Metrics;
+  readonly metrics?: Metrics;
   readonly now?: () => Date;
   readonly holder?: string;
   readonly claimTtlMs?: number;
@@ -41,7 +48,12 @@ export class Runtime {
   public readonly now: () => Date;
   private readonly drivers: ReadonlyMap<string, ModelDriver>;
   private readonly claimTtlMs: number;
+  private readonly ledgerMetrics: LedgerMetrics | undefined;
+  private readonly triggerEngine: TriggerEngine;
+  private readonly paused = new Set<string>();
+  private seq = 0;
   private started = false;
+  private stopSuppliers: (() => Promise<void>) | undefined;
 
   public constructor(options: RuntimeOptions) {
     const problems = validate(options.harness);
@@ -49,17 +61,26 @@ export class Runtime {
     this.harness = options.harness;
     this.ledger = options.harness.ledgerDef!;
     this.resolver = options.resolver;
-    this.metrics = options.metrics;
     this.now = options.now ?? (() => new Date());
+    this.ledgerMetrics = options.metrics ? undefined : new LedgerMetrics(this.ledger, this.harness, this.now);
+    this.metrics = options.metrics ?? this.ledgerMetrics!;
     this.holder = options.holder ?? `${options.harness.name}:${randomUUID()}`;
     this.claimTtlMs = options.claimTtlMs ?? 30_000;
     this.drivers = new Map(options.drivers.map((driver) => [driver.driver, driver]));
+    this.triggerEngine = new TriggerEngine(this, this.ledgerMetrics ?? new LedgerMetrics(this.ledger, this.harness, this.now));
   }
 
   public async start(): Promise<void> {
     const claim = await this.ledger.claimWriter(this.holder, this.claimTtlMs);
     if (!claim.acquired) throw new Error(`ledger is held by "${claim.holder}" until ${claim.expiresAt.toISOString()}`);
     this.started = true;
+    for await (const { seq, event } of this.ledger.read({})) {
+      this.seq = seq;
+      if (event.type === 'lanePaused') this.paused.add(event.lane);
+      if (event.type === 'laneResumed') this.paused.delete(event.lane);
+    }
+    await this.triggerEngine.prime();
+    this.stopSuppliers = await startSuppliers(this);
     for (const record of await this.ledger.units({ attemptStatus: ['running', 'blocked'] })) {
       const attempt = record.unit.attempt;
       if (!attempt) continue;
@@ -77,13 +98,61 @@ export class Runtime {
   }
 
   public async stop(): Promise<void> {
+    if (this.stopSuppliers) await this.stopSuppliers();
+    this.stopSuppliers = undefined;
     await this.ledger.releaseWriter(this.holder);
     this.started = false;
   }
 
-  public async append(events: readonly LedgerEvent[]): Promise<void> {
+  public async append(events: readonly LedgerEvent[]): Promise<readonly number[]> {
     if (!this.started) await this.ledger.claimWriter(this.holder, this.claimTtlMs);
-    await this.ledger.append(events, this.holder);
+    const seqs = await this.ledger.append(events, this.holder);
+    for (const event of events) {
+      if (event.type === 'lanePaused') this.paused.add(event.lane);
+      if (event.type === 'laneResumed') this.paused.delete(event.lane);
+    }
+    this.seq = Math.max(this.seq, ...seqs);
+    return seqs;
+  }
+
+  public lastSeq(): number {
+    return this.seq;
+  }
+
+  public pausedLanes(): ReadonlySet<string> {
+    return this.paused;
+  }
+
+  public async find(unitId: string): Promise<UnitRecord | undefined> {
+    return this.ledger.unit(unitId);
+  }
+
+  public async recordMemory(journal: JournalDef, draft: MemoryDraft, by: string): Promise<void> {
+    if (!journal.memoryStore) throw new Error(`journal "${journal.name}" has no store to record into`);
+    await journal.memoryStore.put({
+      id: `mem-${randomUUID()}`,
+      memoryKind: journal.memoryKind.name,
+      journal: journal.name,
+      createdAt: this.now(),
+      status: draft.status ?? 'candidate',
+      when: {
+        kinds: (draft.when?.kinds ?? []).map((kind) => kind.name),
+        roles: (draft.when?.roles ?? []).map((role) => role.name),
+        resources: (draft.when?.resources ?? []).map((resource) => resource.name),
+        facets: (draft.when?.facets ?? []).map((facet) => ({ facet: facet.facet.name, value: facet.value })),
+      },
+      text: `${draft.text}`,
+      trackRecord: { used: 0, succeeded: 0 },
+    });
+    void by;
+  }
+
+  public async runExecutable(exec: Executable<unknown, unknown>, input: JsonObject): Promise<void> {
+    if (exec.entity !== 'command') throw new Error(`a trigger can run a command, not a ${exec.entity}`);
+    const command = exec as CommandDef<unknown, unknown>;
+    const runner = command.runnerChoice;
+    if (!runner || runner.entity !== 'runner') throw new Error(`command "${command.name}" has no fixed runner for a trigger to use`);
+    await runner.backend.exec({ argv: command.argvOf ? command.argvOf(input) : [], env: {} }, new AbortController().signal, this.resolver);
   }
 
   public lane(name: string): AnyLane {
@@ -168,7 +237,7 @@ export class Runtime {
     return (await this.ledger.units({ lane: lane.name })).filter((record) => record.unit.parentId === parentId);
   }
 
-  public async startAttempt(unitId: string): Promise<WalkOutcome> {
+  public async startAttempt(unitId: string, serviceClass: 'expedite' | 'fixedDate' | 'standard' = 'standard'): Promise<WalkOutcome> {
     const record = await this.record(unitId);
     if (record.unit.attempt) throw new Error(`unit "${unitId}" already has an open attempt`);
     const lane = this.lane(record.unit.lane);
@@ -176,8 +245,8 @@ export class Runtime {
     const attemptId = `attempt-${randomUUID()}`;
     const at = this.now();
     await this.append([
-      { type: 'demandGranted', lane: lane.name, unitId, serviceClass: 'standard', at },
-      { type: 'attemptStarted', unitId, attemptId, number: record.unit.attempts + 1, fromStep: flow.nodes[0]?.name ?? '', flow: flow.name, flowVersion: flowVersion(flow), serviceClass: 'standard', at },
+      { type: 'demandGranted', lane: lane.name, unitId, serviceClass, at },
+      { type: 'attemptStarted', unitId, attemptId, number: record.unit.attempts + 1, fromStep: flow.nodes[0]?.name ?? '', flow: flow.name, flowVersion: flowVersion(flow), serviceClass, at },
     ]);
     return this.drive(unitId);
   }
@@ -280,7 +349,11 @@ export class Runtime {
     const record = await this.record(unitId);
     const attempt = record.unit.attempt;
     if (!attempt || attempt.status !== 'blocked' || attempt.blockedOn !== 'decision' || !attempt.halt) throw new Error(`unit "${unitId}" is not waiting on a decision`);
-    await this.append([{ type: 'decisionRecorded', attemptId: attempt.id, step: attempt.step, halt: attempt.halt, decision, resolvedBy: 'human', by, at: this.now() }]);
+    let facets: readonly { readonly facet: string; readonly value: string }[] = [];
+    for await (const { event } of this.ledger.read({ attemptId: attempt.id, types: ['attemptBlocked'] })) {
+      if (event.type === 'attemptBlocked' && event.step === attempt.step && event.facets) facets = event.facets;
+    }
+    await this.append([{ type: 'decisionRecorded', attemptId: attempt.id, step: attempt.step, halt: attempt.halt, decision, resolvedBy: 'human', by, facets, at: this.now() }]);
     return this.resumeAttempt(unitId, { step: attempt.step, decision });
   }
 
@@ -340,6 +413,7 @@ export class Runtime {
 
   public async tick(): Promise<void> {
     const now = this.now();
+    if (this.ledgerMetrics) await this.ledgerMetrics.refresh();
     for (const timer of await this.ledger.dueTimers(now)) {
       await this.append([{ type: 'timerFired', timerId: timer.timerId, unitId: timer.unitId, at: now }]);
       if (timer.owner.startsWith('resume:')) {
@@ -360,6 +434,11 @@ export class Runtime {
         if (children.length > 0 && children.every((child) => child.unit.position === 'terminal')) await this.resumeAttempt(record.unit.id, { step: record.unit.attempt.step });
       }
     }
+    await this.triggerEngine.process();
+    for (const grant of await computeDemand(this)) {
+      await this.startAttempt(grant.unitId, grant.serviceClass);
+    }
+    await this.triggerEngine.process();
   }
 
   public async record(unitId: string): Promise<UnitRecord> {
