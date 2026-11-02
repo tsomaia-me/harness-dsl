@@ -4,20 +4,23 @@ import type { Executable } from '../dsl/executables.js';
 import type { FlowCtx, FlowDef, FlowNode, HaltOptions, StepOptions } from '../dsl/flows.js';
 import type { HaltDef } from '../dsl/halts.js';
 import type { JobDef, JobHandle, JobPoll } from '../dsl/jobs.js';
+import type { RoleDef } from '../dsl/roles.js';
 import type { LaneDef } from '../dsl/lanes.js';
 import type { RunnerPolicyDef } from '../dsl/policies.js';
 import type { RunnerDef } from '../dsl/runners.js';
-import type { SeatDef } from '../dsl/seats.js';
 import type { ChildResult, UnitView } from '../dsl/views.js';
-import type { LedgerEvent, Metrics, ModelResponse, State, StoredFacetValue, UnitRecord } from '../kernel/index.js';
+import type { Account, KindRef, LedgerEvent, MemoryItem, Metrics, Model, ModelDriver, ModelRequest, ModelResponse, State, StoredFacetValue, UnitRecord } from '../kernel/index.js';
+import { AccountRefusedError } from '../kernel/quota.js';
 import type { Json, JsonObject } from '../kernel/refs.js';
 import { address, type Frame } from './address.js';
 import type { Memo } from './memo.js';
-import type { Runtime } from './runtime.js';
+import type { Recalled } from './recall.js';
+import type { QuotaEventBody, Runtime } from './runtime.js';
+import { modelsOf, type AnySeat } from './seats.js';
 
 export type WalkOutcome =
   | { readonly kind: 'exit'; readonly exit: string }
-  | { readonly kind: 'blocked'; readonly step: string; readonly on: 'decision' | 'timer' | 'children' | 'job' | 'interrupted'; readonly halt?: HaltDef<string, unknown>; readonly ask?: string; readonly facets?: readonly StoredFacetValue[]; readonly detail?: string; readonly resumeAt?: Date }
+  | { readonly kind: 'blocked'; readonly step: string; readonly on: 'decision' | 'timer' | 'children' | 'job' | 'interrupted' | 'budget'; readonly halt?: HaltDef<string, unknown>; readonly ask?: string; readonly facets?: readonly StoredFacetValue[]; readonly detail?: string; readonly resumeAt?: Date }
   | { readonly kind: 'failed'; readonly step: string; readonly error: string };
 
 class Blocked {
@@ -231,7 +234,7 @@ class Walker {
       case 'command':
         return this.command(exec as CommandDef<unknown, unknown>, input, addr, iteration);
       case 'seat':
-        return this.seat(exec as SeatDef<unknown, unknown, string, boolean>, input, node.options, addr, iteration);
+        return this.seat(exec as AnySeat, input, node.options, addr, iteration);
       case 'job':
         return this.job(exec as JobDef<unknown, unknown>, input, addr, iteration);
       default:
@@ -299,60 +302,122 @@ class Walker {
     return runner.backend.exec({ argv, env: {} }, new AbortController().signal, this.runtime.resolver);
   }
 
-  private async seat(seat: SeatDef<unknown, unknown, string, boolean>, input: unknown, options: StepOptions, addr: string, iteration: number): Promise<unknown> {
+  private kindRef(): KindRef {
+    return { entity: 'kind', name: this.input.record.unit.kind };
+  }
+
+  private async recallFor(role: RoleDef<unknown, unknown>, options: StepOptions): Promise<Recalled> {
+    const recalled = await this.runtime.recallFor({
+      kind: this.input.record.unit.kind,
+      role: role.name,
+      resources: options.guard?.leases?.all.map((resource) => resource.name) ?? [],
+      facets: [],
+    });
+    await this.append(recalled.decisions.map((decision) => ({ type: 'policyDecision' as const, attemptId: this.input.attemptId, policy: decision.policy, value: [...decision.ids], at: this.runtime.now() })));
+    return recalled;
+  }
+
+  private request(seat: AnySeat, model: Model, account: Account, input: unknown, memory: readonly MemoryItem[], options: StepOptions, key: string, extra: Pick<ModelRequest, 'resume' | 'workspacePath'> = {}): ModelRequest {
     const role = seat.roleDef!;
-    const driver = this.runtime.driverFor(seat);
+    return {
+      seat: seat.name,
+      model: model.id,
+      account,
+      role: { name: role.name, intents: role.intentList, prompt: role.render ? role.render(input) : '' },
+      input: input as Json,
+      memory,
+      halts: (options.halts ?? []).map((halt) => ({ name: halt.name, decisionSchema: halt.decisionSchema ? (z.toJSONSchema(halt.decisionSchema) as Json) : {} })),
+      outputSchema: role.outputSchema ? (z.toJSONSchema(role.outputSchema) as Json) : {},
+      idempotencyKey: key,
+      ...extra,
+    };
+  }
+
+  private usageOf(response: ModelResponse): QuotaEventBody[] {
+    const at = this.runtime.now();
+    return [
+      { type: 'consumed', tokens: response.tokens, costUsd: response.costUsd ?? 0, at },
+      ...(response.windows ?? []).map((window) => ({ type: 'windowObserved' as const, window: window.window, utilization: window.utilization, resetsAt: window.resetsAt, at })),
+      ...(response.cooldownUntil ? [{ type: 'cooldown' as const, until: response.cooldownUntil, reason: 'reported by the driver', at }] : []),
+    ];
+  }
+
+  /**
+   * Runs one call on an account of the seat's pool. An account that refuses the call gets its
+   * cooldown and windows on the partition, a failed invocation on the ledger, and the next account
+   * tries; no account at all blocks the step on budget.
+   */
+  private async withAccount<T>(seat: AnySeat, model: Model, addr: string, viaJob: boolean, call: (account: Account) => Promise<T>): Promise<{ readonly account: Account; readonly number: number; readonly result: T }> {
+    const excluded = new Set<string>();
+    let number = 0;
+    for (;;) {
+      const acquired = await this.runtime.acquireAccount(seat, model, excluded, this.input.attemptId);
+      if (!acquired.account) throw new Blocked({ kind: 'blocked', step: addr, on: 'budget', detail: acquired.detail, ...(acquired.resumeAt ? { resumeAt: acquired.resumeAt } : {}) });
+      const account = acquired.account;
+      number += 1;
+      const startedAt = this.runtime.now();
+      try {
+        return { account, number, result: await call(account) };
+      } catch (err) {
+        if (!(err instanceof AccountRefusedError)) throw err;
+        const at = this.runtime.now();
+        await this.runtime.quotaEvents(account, [
+          { type: 'cooldown', until: err.until, reason: `${err.refusal}: ${err.message}`, at },
+          ...err.windows.map((window) => ({ type: 'windowObserved' as const, window: window.window, utilization: window.utilization, resetsAt: window.resetsAt, at })),
+        ]);
+        await this.append([{ type: 'invocation', attemptId: this.input.attemptId, step: addr, number, executable: seat.name, seat: seat.name, model: model.name, account: account.name, viaJob, ok: false, costUsd: 0, durationMs: Math.max(0, at.getTime() - startedAt.getTime()), at }]);
+        excluded.add(account.name);
+      }
+    }
+  }
+
+  private async seat(seat: AnySeat, input: unknown, options: StepOptions, addr: string, iteration: number): Promise<unknown> {
+    const role = seat.roleDef!;
+    const key = `${this.input.attemptId}/${addr}`;
+    const model = await this.runtime.chooseModel(seat, this.kindRef(), this.input.attemptId);
+    const driver = this.runtime.driverFor(model);
     const recorded = this.input.memo.invocations.get(addr);
     const startedAt = this.runtime.now();
     let response: ModelResponse | undefined;
     if (recorded?.started && !recorded.ended) {
       await this.append([{ type: 'attemptInterrupted', attemptId: this.input.attemptId, step: addr, holder: this.runtime.holder, at: this.runtime.now() }]);
-      const status = driver.session ? await driver.session(addr, this.runtime.resolver) : { status: 'lost' as const };
+      const status = driver.session ? await driver.session(key, this.runtime.resolver) : { status: 'lost' as const };
       if (status.status === 'finished') response = status.response;
-      else if (status.status === 'running') throw new Blocked({ kind: 'blocked', step: addr, on: 'job', detail: `session "${addr}" is still running in the driver` });
+      else if (status.status === 'running') throw new Blocked({ kind: 'blocked', step: addr, on: 'job', detail: `session "${key}" is still running in the driver` });
     }
     if (!response) {
       await this.visit(addr, iteration);
-      const account = await this.runtime.acquireAccount(seat);
+      const recalled = await this.recallFor(role, options);
       const resume = this.input.resume?.step === addr && this.input.resume.decision !== undefined && recorded?.sessionId
         ? { sessionId: recorded.sessionId, halt: this.input.memo.blocked?.halt ?? '', decision: this.input.resume.decision }
         : undefined;
       const workspacePath = options.workspace ? (await options.workspace.backend.prepare(this.input.attemptId)).path : undefined;
-      response = await driver.invoke(
-        {
-          seat: seat.name,
-          model: this.runtime.modelFor(seat).id,
-          account,
-          role: { name: role.name, intents: role.intentList, prompt: role.render ? role.render(input) : '' },
-          input: input as Json,
-          memory: [],
-          halts: (options.halts ?? []).map((halt) => ({ name: halt.name, decisionSchema: halt.decisionSchema ? (z.toJSONSchema(halt.decisionSchema) as Json) : {} })),
-          outputSchema: role.outputSchema ? (z.toJSONSchema(role.outputSchema) as Json) : {},
-          ...(workspacePath ? { workspacePath } : {}),
-          idempotencyKey: addr,
-          ...(resume ? { resume } : {}),
-        },
-        this.runtime.resolver,
+      const call = await this.withAccount(seat, model, addr, false, (account) =>
+        driver.invoke(this.request(seat, model, account, input, recalled.items, options, key, { ...(resume ? { resume } : {}), ...(workspacePath ? { workspacePath } : {}) }), this.runtime.resolver),
       );
+      response = call.result;
+      await this.runtime.quotaEvents(call.account, this.usageOf(response));
       await this.append([
         {
           type: 'invocation',
           attemptId: this.input.attemptId,
           step: addr,
-          number: 1,
+          number: call.number,
           executable: seat.name,
           seat: seat.name,
-          model: this.runtime.modelFor(seat).name,
-          account: account.name,
+          model: model.name,
+          account: call.account.name,
           viaJob: false,
           ok: true,
           costUsd: response.costUsd ?? 0,
           tokens: response.tokens,
           ...(response.sessionId ? { sessionId: response.sessionId } : {}),
+          ...(recalled.items.length > 0 ? { memory: recalled.items.map((item) => item.id) } : {}),
           durationMs: Math.max(0, this.runtime.now().getTime() - startedAt.getTime()),
           at: this.runtime.now(),
         },
       ]);
+      await this.runtime.recordFromRole(role.name, seat.name, response.recorded ?? []);
     }
     if (response.halt) {
       const halt = (options.halts ?? []).find((candidate) => candidate.name === response!.halt!.halt);
@@ -370,7 +435,7 @@ class Walker {
   private async job(job: JobDef<unknown, unknown>, input: unknown, addr: string, iteration: number): Promise<unknown> {
     const submitted = this.input.memo.jobs.get(addr);
     if (submitted && !submitted.collected) {
-      const poll = await this.pollJob(job, submitted.jobId);
+      const poll = await this.pollJob(job, submitted.jobId, addr);
       if (poll.state === 'running') throw new Blocked({ kind: 'blocked', step: addr, on: 'job', resumeAt: new Date(this.runtime.now().getTime() + job.pollEveryMinutes * 60_000) });
       await this.append([{ type: 'jobCollected', attemptId: this.input.attemptId, step: addr, job: job.name, jobId: submitted.jobId, state: poll.state, at: this.runtime.now() }]);
       if (poll.state === 'failed') {
@@ -381,20 +446,99 @@ class Walker {
       return poll.result;
     }
     await this.visit(addr, iteration);
-    const handle = await this.submitJob(job, input, addr);
-    await this.append([{ type: 'jobSubmitted', attemptId: this.input.attemptId, step: addr, job: job.name, jobId: handle.jobId, requests: 1, at: this.runtime.now() }]);
+    const { handle, requests } = await this.submitJob(job, input, addr);
+    await this.append([{ type: 'jobSubmitted', attemptId: this.input.attemptId, step: addr, job: job.name, jobId: handle.jobId, requests, at: this.runtime.now() }]);
     throw new Blocked({ kind: 'blocked', step: addr, on: 'job', resumeAt: new Date(this.runtime.now().getTime() + job.pollEveryMinutes * 60_000) });
   }
 
-  private async submitJob(job: JobDef<unknown, unknown>, input: unknown, addr: string): Promise<JobHandle> {
+  private batchDriver(seat: AnySeat, model: Model, addr: string): ModelDriver {
+    const driver = this.runtime.driverFor(model);
+    if (!driver.submitBatch || !driver.collectBatch) throw new StepFailed({ kind: 'failed', step: addr, error: `driver "${driver.name}" cannot run batches for seat "${seat.name}"` });
+    return driver;
+  }
+
+  private async submitJob(job: JobDef<unknown, unknown>, input: unknown, addr: string): Promise<{ readonly handle: JobHandle; readonly requests: number }> {
+    if (job.batchOf) {
+      const seat = job.batchOf;
+      const items = input as readonly unknown[];
+      const model = await this.runtime.chooseModel(seat, this.kindRef(), this.input.attemptId);
+      const driver = this.batchDriver(seat, model, addr);
+      const recalled = await this.recallFor(seat.roleDef!, {});
+      const key = `${this.input.attemptId}/${addr}`;
+      const startedAt = this.runtime.now();
+      const call = await this.withAccount(seat, model, addr, true, (account) =>
+        driver.submitBatch!(items.map((item, index) => this.request(seat, model, account, item, recalled.items, {}, `${key}#${index}`)), this.runtime.resolver),
+      );
+      await this.append([
+        {
+          type: 'invocation',
+          attemptId: this.input.attemptId,
+          step: addr,
+          number: call.number,
+          executable: job.name,
+          seat: seat.name,
+          model: model.name,
+          account: call.account.name,
+          viaJob: true,
+          ok: true,
+          costUsd: 0,
+          tokens: 0,
+          ...(recalled.items.length > 0 ? { memory: recalled.items.map((item) => item.id) } : {}),
+          durationMs: Math.max(0, this.runtime.now().getTime() - startedAt.getTime()),
+          at: this.runtime.now(),
+        },
+      ]);
+      return { handle: call.result, requests: items.length };
+    }
     if (job.submit?.entity === 'command') {
       const result = (await this.command(job.submit as CommandDef<unknown, unknown>, input, `${addr}/submit`, this.iteration)) as JobHandle;
-      return result;
+      return { handle: result, requests: 1 };
     }
     throw new StepFailed({ kind: 'failed', step: addr, error: `job "${job.name}" has no submit command the engine can run` });
   }
 
-  private async pollJob(job: JobDef<unknown, unknown>, jobId: string): Promise<JobPoll<unknown>> {
+  private async submittedBatch(addr: string): Promise<Extract<LedgerEvent, { type: 'invocation' }> | undefined> {
+    let found: Extract<LedgerEvent, { type: 'invocation' }> | undefined;
+    for await (const { event } of this.runtime.ledger.read({ attemptId: this.input.attemptId, types: ['invocation'] })) {
+      if (event.type === 'invocation' && event.step === addr && event.viaJob && event.ok) found = event;
+    }
+    return found;
+  }
+
+  private async pollJob(job: JobDef<unknown, unknown>, jobId: string, addr: string): Promise<JobPoll<unknown>> {
+    if (job.batchOf) {
+      const seat = job.batchOf;
+      const role = seat.roleDef!;
+      const submitted = await this.submittedBatch(addr);
+      const model = submitted?.model ? modelsOf(seat).find((candidate) => candidate.name === submitted.model) : undefined;
+      if (!submitted || !model) return { state: 'failed', reason: `batch "${job.name}" has no recorded submission at "${addr}"` };
+      const driver = this.batchDriver(seat, model, addr);
+      let responses: readonly ModelResponse[] | undefined;
+      try {
+        responses = await driver.collectBatch!(jobId, this.runtime.resolver);
+      } catch (err) {
+        return { state: 'failed', reason: err instanceof Error ? err.message : String(err) };
+      }
+      if (!responses) return { state: 'running' };
+      const account = submitted.account ? this.runtime.accountNamed(seat, submitted.account) : undefined;
+      const at = this.runtime.now();
+      const tokens = responses.reduce((sum, response) => sum + response.tokens, 0);
+      const costUsd = responses.reduce((sum, response) => sum + (response.costUsd ?? 0), 0);
+      if (account) {
+        await this.runtime.quotaEvents(account, [
+          { type: 'consumed', tokens, costUsd, at },
+          ...responses.flatMap((response) => (response.windows ?? []).map((window) => ({ type: 'windowObserved' as const, window: window.window, utilization: window.utilization, resetsAt: window.resetsAt, at }))),
+        ]);
+      }
+      await this.append([{ type: 'invocation', attemptId: this.input.attemptId, step: addr, number: submitted.number + 1, executable: job.name, seat: seat.name, model: model.name, ...(submitted.account ? { account: submitted.account } : {}), viaJob: true, ok: true, costUsd, tokens, durationMs: 0, at }]);
+      const outputs: unknown[] = [];
+      for (const [index, response] of responses.entries()) {
+        const parsed = role.outputSchema ? role.outputSchema.safeParse(response.output) : { success: true as const, data: response.output };
+        if (!parsed.success) return { state: 'failed', reason: `batch "${job.name}" item ${index} returned output that fails the role's schema` };
+        outputs.push(parsed.data);
+      }
+      return { state: 'succeeded', result: outputs };
+    }
     if (job.collect?.entity === 'command') {
       const command = job.collect as CommandDef<JobHandle, JobPoll<unknown>>;
       const runner = command.runnerChoice;

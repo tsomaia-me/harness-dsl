@@ -119,12 +119,13 @@ export class LedgerMetrics implements Metrics {
 
   public attempts(query: { readonly of: WorkScope; readonly seat?: { readonly name: string }; readonly model?: { readonly name: string }; readonly window?: Window }): AttemptCounts {
     const now = this.now();
-    const participants = new Map<string, { seats: Set<string>; models: Set<string> }>();
+    const participants = new Map<string, { seats: Set<string>; models: Set<string>; pairs: Set<string> }>();
     for (const event of this.events) {
       if (event.type !== 'invocation') continue;
-      const entry = participants.get(event.attemptId) ?? { seats: new Set(), models: new Set() };
+      const entry = participants.get(event.attemptId) ?? { seats: new Set(), models: new Set(), pairs: new Set() };
       if (event.seat) entry.seats.add(event.seat);
       if (event.model) entry.models.add(event.model);
+      if (event.seat && event.model) entry.pairs.add(`${event.seat}|${event.model}`);
       participants.set(event.attemptId, entry);
     }
     let succeeded = 0;
@@ -137,6 +138,7 @@ export class LedgerMetrics implements Metrics {
       const owner = this.laneOfAttempt(event.attemptId);
       if (!owner || !this.scoped(query.of, owner.unitId)) continue;
       const entry = participants.get(event.attemptId);
+      if (query.seat && query.model && !entry?.pairs.has(`${query.seat.name}|${query.model.name}`)) continue;
       if (query.seat && !entry?.seats.has(query.seat.name)) continue;
       if (query.model && !entry?.models.has(query.model.name)) continue;
       if (event.outcome === 'succeeded') succeeded += 1;

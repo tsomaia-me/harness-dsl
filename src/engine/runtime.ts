@@ -3,11 +3,10 @@ import type { FlowDef } from '../dsl/flows.js';
 import type { HarnessDef } from '../dsl/harness.js';
 import type { LaneAny, LaneDef } from '../dsl/lanes.js';
 import type { ModelPolicyDef } from '../dsl/policies.js';
-import type { SeatDef } from '../dsl/seats.js';
 import type { UnitView } from '../dsl/views.js';
 import { validate } from '../dsl/validate.js';
-import type { Ledger, LedgerEvent, Metrics, Model, ModelDriver, Resolver, State, UnitRecord } from '../kernel/index.js';
-import type { Account, AccountState } from '../kernel/quota.js';
+import type { KindRef, Ledger, LedgerEvent, MemoryItem, Metrics, Model, ModelDriver, ModelResponse, Resolver, State, UnitRecord } from '../kernel/index.js';
+import type { Account, AccountState, QuotaEvent, QuotaPartition } from '../kernel/quota.js';
 import type { Json, JsonObject } from '../kernel/refs.js';
 import type { CommandDef } from '../dsl/commands.js';
 import type { Executable } from '../dsl/executables.js';
@@ -16,6 +15,9 @@ import { flowVersion } from './address.js';
 import { computeDemand } from './demand.js';
 import { buildMemo } from './memo.js';
 import { LedgerMetrics } from './metrics.js';
+import { foldAccountState } from './quota.js';
+import { recall, type RecallScope, type Recalled } from './recall.js';
+import { accountsOf, modelsOf, partitionsOf, seatSteps, seatsOf, type AnySeat } from './seats.js';
 import { startSuppliers } from './supply.js';
 import { TriggerEngine } from './triggers.js';
 import { walk, type WalkOutcome } from './walker.js';
@@ -38,6 +40,14 @@ export class StartupError extends Error {
 }
 
 type AnyLane = LaneDef<unknown, State, unknown, string>;
+type Body<E> = E extends unknown ? Omit<E, 'account' | 'harness'> : never;
+export type QuotaEventBody = Body<QuotaEvent>;
+
+export interface AcquiredAccount {
+  readonly account?: Account;
+  readonly resumeAt?: Date;
+  readonly detail: string;
+}
 
 export class Runtime {
   public readonly harness: HarnessDef;
@@ -50,15 +60,28 @@ export class Runtime {
   private readonly claimTtlMs: number;
   private readonly ledgerMetrics: LedgerMetrics | undefined;
   private readonly triggerEngine: TriggerEngine;
+  private readonly seatOrder: readonly AnySeat[];
+  private readonly seatModels = new Map<string, string>();
+  private readonly partitions: readonly QuotaPartition[];
   private readonly paused = new Set<string>();
   private seq = 0;
   private started = false;
   private stopSuppliers: (() => Promise<void>) | undefined;
 
   public constructor(options: RuntimeOptions) {
-    const problems = validate(options.harness);
+    const problems = [...validate(options.harness)];
+    const drivers = new Map(options.drivers.map((driver) => [driver.driver, driver]));
+    for (const step of seatSteps(options.harness)) {
+      for (const model of modelsOf(step.seat)) {
+        const driver = drivers.get(model.driver);
+        if (!driver) problems.push({ rule: 11, message: `seat "${step.seat.name}" chooses model "${model.name}" of driver "${model.driver}", which is not registered` });
+        else if (step.guarded && !driver.hooks) problems.push({ rule: 13, message: `step "${step.path}" guards seat "${step.seat.name}" but driver "${driver.name}" has no hooks` });
+      }
+    }
     if (problems.length > 0) throw new StartupError(problems);
     this.harness = options.harness;
+    this.seatOrder = seatsOf(options.harness);
+    this.partitions = partitionsOf(options.harness);
     this.ledger = options.harness.ledgerDef!;
     this.resolver = options.resolver;
     this.now = options.now ?? (() => new Date());
@@ -66,18 +89,23 @@ export class Runtime {
     this.metrics = options.metrics ?? this.ledgerMetrics!;
     this.holder = options.holder ?? `${options.harness.name}:${randomUUID()}`;
     this.claimTtlMs = options.claimTtlMs ?? 30_000;
-    this.drivers = new Map(options.drivers.map((driver) => [driver.driver, driver]));
+    this.drivers = drivers;
     this.triggerEngine = new TriggerEngine(this, this.ledgerMetrics ?? new LedgerMetrics(this.ledger, this.harness, this.now));
   }
 
   public async start(): Promise<void> {
     const claim = await this.ledger.claimWriter(this.holder, this.claimTtlMs);
     if (!claim.acquired) throw new Error(`ledger is held by "${claim.holder}" until ${claim.expiresAt.toISOString()}`);
+    try {
+      await this.joinPartitions();
+    } catch (err) {
+      await this.ledger.releaseWriter(this.holder);
+      throw err;
+    }
     this.started = true;
     for await (const { seq, event } of this.ledger.read({})) {
       this.seq = seq;
-      if (event.type === 'lanePaused') this.paused.add(event.lane);
-      if (event.type === 'laneResumed') this.paused.delete(event.lane);
+      this.note(event);
     }
     await this.triggerEngine.prime();
     this.stopSuppliers = await startSuppliers(this);
@@ -107,12 +135,22 @@ export class Runtime {
   public async append(events: readonly LedgerEvent[]): Promise<readonly number[]> {
     if (!this.started) await this.ledger.claimWriter(this.holder, this.claimTtlMs);
     const seqs = await this.ledger.append(events, this.holder);
-    for (const event of events) {
-      if (event.type === 'lanePaused') this.paused.add(event.lane);
-      if (event.type === 'laneResumed') this.paused.delete(event.lane);
-    }
+    for (const event of events) this.note(event);
     this.seq = Math.max(this.seq, ...seqs);
     return seqs;
+  }
+
+  private note(event: LedgerEvent): void {
+    if (event.type === 'lanePaused') this.paused.add(event.lane);
+    if (event.type === 'laneResumed') this.paused.delete(event.lane);
+    if (event.type === 'invocation' && event.ok && event.seat && event.model) this.seatModels.set(event.seat, event.model);
+  }
+
+  private async joinPartitions(): Promise<void> {
+    for (const partition of this.partitions) {
+      const joined = await partition.join(this.harness.name, this.holder, this.claimTtlMs);
+      if (!joined.accepted) throw new Error(`partition "${partition.name}" refuses harness "${this.harness.name}": held by "${joined.heldBy}"`);
+    }
   }
 
   public lastSeq(): number {
@@ -190,28 +228,143 @@ export class Runtime {
     };
   }
 
-  public driverFor(seat: SeatDef<unknown, unknown, string, boolean>): ModelDriver {
-    const model = this.modelFor(seat);
+  public driverFor(model: Model): ModelDriver {
     const driver = this.drivers.get(model.driver);
-    if (!driver) throw new Error(`no driver registered for "${model.driver}", which seat "${seat.name}" needs`);
+    if (!driver) throw new Error(`no driver registered for "${model.driver}", which model "${model.name}" needs`);
     return driver;
   }
 
-  public modelFor(seat: SeatDef<unknown, unknown, string, boolean>): Model {
+  private currentModel(seat: AnySeat): Model | undefined {
+    const name = this.seatModels.get(seat.name);
+    return name === undefined ? undefined : modelsOf(seat).find((model) => model.name === name);
+  }
+
+  /**
+   * The seat's model: fixed, or chosen by its policy with the seat's current model and its peers'.
+   * Seats sharing a `distinct` policy are ordered by registration; a later seat may not take a model
+   * an earlier seat holds, so a swap is the earlier seat moving and the later one yielding (design §3.8).
+   */
+  public async chooseModel(seat: AnySeat, kind: KindRef, attemptId: string): Promise<Model> {
     const choice = seat.modelChoice!;
     if (choice.entity === 'model') return choice;
     const policy = choice as ModelPolicyDef;
-    return policy.decide({ kind: { entity: 'kind', name: '' }, seat, peers: [], metrics: this.metrics });
+    const sharers = this.seatOrder.filter((candidate) => candidate.modelChoice === policy);
+    const peers = sharers
+      .filter((candidate) => candidate !== seat)
+      .flatMap((candidate) => {
+        const model = this.currentModel(candidate);
+        return model ? [{ seat: candidate, model }] : [];
+      });
+    const current = this.currentModel(seat);
+    const picked = policy.decide({ kind, seat, ...(current ? { current } : {}), peers, metrics: this.metrics });
+    const at = this.now();
+    await this.append([{ type: 'policyDecision', attemptId, policy: policy.name, value: picked.name, at }]);
+    if (!policy.distinct) return picked;
+    const earlier = sharers.slice(0, sharers.indexOf(seat));
+    const holderOf = (model: Model) => earlier.find((candidate) => this.currentModel(candidate)?.name === model.name);
+    const holder = holderOf(picked);
+    if (!holder) return picked;
+    const kept = current && !holderOf(current) ? current : policy.candidates.find((candidate) => !holderOf(candidate));
+    if (!kept) throw new Error(`policy "${policy.name}" has no model left for seat "${seat.name}"`);
+    await this.append([{ type: 'policyRefused', attemptId, policy: policy.name, reason: `seat "${seat.name}" chose "${picked.name}", which seat "${holder.name}" holds`, kept: kept.name, at }]);
+    return kept;
   }
 
-  public async acquireAccount(seat: SeatDef<unknown, unknown, string, boolean>): Promise<Account> {
+  public accountNamed(seat: AnySeat, name: string): Account | undefined {
+    return accountsOf(seat).find((account) => account.name === name);
+  }
+
+  public shareFor(account: Account): number {
+    return this.harness.shares.find((share) => share.account.name === account.name)?.fraction ?? 1;
+  }
+
+  /**
+   * An account of the seat's pool for one call (design §5.10): candidates fold from the partition,
+   * the drain policy chooses among them, a cooled-down or over-share pick is refused and recorded,
+   * the fallback serves when the pool has nothing, and nothing at all blocks the step on budget
+   * until the soonest cooldown or window reset.
+   */
+  public async acquireAccount(seat: AnySeat, model: Model, excluded: ReadonlySet<string>, attemptId: string): Promise<AcquiredAccount> {
     const pool = seat.poolDef!;
+    const driver = this.driverFor(model);
     const now = this.now();
-    const candidates: AccountState[] = pool.accountList.map((account) => ({ account, utilization: 0, shareUsed: 0, shareCap: 1, windowResetsAt: null }));
-    const chosen = pool.drainPolicy ? pool.drainPolicy.decide({ candidates, now })?.account : candidates[0]?.account;
-    const account = chosen ?? pool.fallbackAccount;
-    if (!account) throw new Error(`pool "${pool.name}" has no account to serve seat "${seat.name}"`);
-    return account;
+    const serves = (account: Account) => account.driver === model.driver && driver.serves(account) && !excluded.has(account.name);
+    const fold = (account: Account) => foldAccountState(account, this.harness.name, this.shareFor(account), now);
+    const eligible = (state: AccountState) => (state.cooldownUntil === undefined || state.cooldownUntil <= now) && state.shareUsed < state.shareCap;
+    const candidates: AccountState[] = [];
+    for (const account of pool.accountList) if (serves(account)) candidates.push(await fold(account));
+    const fallback = pool.fallbackAccount && serves(pool.fallbackAccount) ? await fold(pool.fallbackAccount) : undefined;
+    const fallbackReady = fallback && eligible(fallback) ? fallback : undefined;
+    let chosen: AccountState | undefined;
+    if (pool.drainPolicy) {
+      const policy = pool.drainPolicy;
+      const picked = candidates.length > 0 ? policy.decide({ candidates, now }) : undefined;
+      if (candidates.length > 0) await this.append([{ type: 'policyDecision', attemptId, policy: policy.name, value: picked?.account.name ?? null, at: now }]);
+      if (picked && eligible(picked)) chosen = picked;
+      else if (picked) {
+        const why = picked.cooldownUntil && picked.cooldownUntil > now ? `cooling down until ${picked.cooldownUntil.toISOString()}` : `over its share (${picked.shareUsed.toFixed(2)} of ${picked.shareCap})`;
+        await this.append([{ type: 'policyRefused', attemptId, policy: policy.name, reason: `account "${picked.account.name}" is ${why}`, kept: fallbackReady?.account.name ?? null, at: now }]);
+      }
+    } else {
+      chosen = candidates.find(eligible);
+    }
+    chosen ??= fallbackReady;
+    if (chosen) return { account: chosen.account, detail: '' };
+    const states = fallback ? [...candidates, fallback] : candidates;
+    const resumeAt = states
+      .flatMap((state) => [state.cooldownUntil, state.windowResetsAt])
+      .filter((when): when is Date => when instanceof Date && when > now)
+      .sort((p, q) => p.getTime() - q.getTime())[0];
+    const described = states.map((state) => `${state.account.name} (utilization ${state.utilization.toFixed(2)}, share ${state.shareUsed.toFixed(2)} of ${state.shareCap}${state.cooldownUntil && state.cooldownUntil > now ? `, cooling down until ${state.cooldownUntil.toISOString()}` : ''})`);
+    return { detail: `pool "${pool.name}" has no account to serve seat "${seat.name}": ${described.join('; ') || 'none it can serve'}`, ...(resumeAt ? { resumeAt } : {}) };
+  }
+
+  public async quotaEvents(account: Account, events: readonly QuotaEventBody[]): Promise<void> {
+    if (events.length === 0) return;
+    await account.quota.append(events.map((event) => ({ ...event, account: account.name, harness: this.harness.name }) as QuotaEvent));
+  }
+
+  public async recallFor(scope: RecallScope): Promise<Recalled> {
+    return recall(this.harness.journalList, scope);
+  }
+
+  /** Items a role recorded during a call enter the journals that list it as a recorder, as candidates (design §5.11). */
+  public async recordFromRole(role: string, seat: string, recorded: NonNullable<ModelResponse['recorded']>): Promise<void> {
+    for (const entry of recorded) {
+      const journal = this.harness.journalList.find((candidate) => candidate.name === entry.journal);
+      if (!journal?.memoryStore || !journal.recorders.some((recorder) => recorder.name === role)) continue;
+      await journal.memoryStore.put({
+        id: `mem-${randomUUID()}`,
+        memoryKind: journal.memoryKind.name,
+        journal: journal.name,
+        createdAt: this.now(),
+        status: 'candidate',
+        when: entry.when,
+        text: entry.text,
+        trackRecord: { used: 0, succeeded: 0 },
+      });
+      void seat;
+    }
+  }
+
+  private async settleTrackRecords(attemptId: string, succeeded: boolean): Promise<void> {
+    const ids: string[] = [];
+    for await (const { event } of this.ledger.read({ attemptId, types: ['invocation'] })) {
+      if (event.type !== 'invocation' || !event.ok) continue;
+      for (const id of event.memory ?? []) if (!ids.includes(id)) ids.push(id);
+    }
+    if (ids.length === 0) return;
+    const items = new Map<string, { readonly journal: JournalDef; readonly item: MemoryItem }>();
+    for (const journal of this.harness.journalList) {
+      if (!journal.memoryStore) continue;
+      for (const item of await journal.memoryStore.list({ journal: journal.name })) items.set(item.id, { journal, item });
+    }
+    for (const id of ids) {
+      const found = items.get(id);
+      if (!found) continue;
+      const record = found.item.trackRecord;
+      await found.journal.memoryStore!.update(id, { trackRecord: { used: record.used + 1, succeeded: record.succeeded + (succeeded ? 1 : 0) } });
+    }
   }
 
   public async createUnit(lane: LaneAny, attrs: unknown, options: { readonly parentId?: string; readonly source: string; readonly key?: string }): Promise<string | undefined> {
@@ -299,6 +452,7 @@ export class Runtime {
         { type: 'transition', unitId, from: record.unit.state, to: state.name, position: state.position, ...(state.verdict ? { verdict: state.verdict } : {}), attemptId, cause: `exit:${outcome.exit}`, at },
         ...(await this.deferredPatches(unitId, record.unit.attempt!.startedAt)),
       ]);
+      await this.settleTrackRecords(attemptId, true);
       return;
     }
     const failed = record.unit.failedAttempts + 1;
@@ -311,6 +465,7 @@ export class Runtime {
         { type: 'retryScheduled', unitId, failedAttempts: failed, notBefore: new Date(at.getTime() + delay), at },
         ...(await this.deferredPatches(unitId, record.unit.attempt!.startedAt)),
       ]);
+      await this.settleTrackRecords(attemptId, false);
       return;
     }
     const exhausted = retry?.exhausted as State | { readonly state: State; readonly reopenAfter: { readonly minutes?: number; readonly hours?: number; readonly days?: number } } | undefined;
@@ -330,6 +485,7 @@ export class Runtime {
       events.push({ type: 'timerSet', timerId: `${unitId}:reopen`, unitId, owner: 'reopen', fireAt: new Date(at.getTime() + ms), reason: 'armed', at });
     }
     await this.append([...events, ...(await this.deferredPatches(unitId, record.unit.attempt!.startedAt))]);
+    await this.settleTrackRecords(attemptId, false);
     void flow;
   }
 
@@ -413,6 +569,7 @@ export class Runtime {
 
   public async tick(): Promise<void> {
     const now = this.now();
+    await this.joinPartitions();
     if (this.ledgerMetrics) await this.ledgerMetrics.refresh();
     for (const timer of await this.ledger.dueTimers(now)) {
       await this.append([{ type: 'timerFired', timerId: timer.timerId, unitId: timer.unitId, at: now }]);

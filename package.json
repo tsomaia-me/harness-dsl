@@ -6,7 +6,8 @@
   "files": [
     "dist",
     "drizzle",
-    "drizzle-ledger"
+    "drizzle-ledger",
+    "drizzle-quota"
   ],
   "publishConfig": {
     "access": "public"

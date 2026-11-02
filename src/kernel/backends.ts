@@ -1,7 +1,7 @@
 import type { SequencedEvent, UnitRecord } from './events.js';
 import type { HaltRef } from './lifecycle.js';
 import type { Metrics } from './metrics.js';
-import type { Account } from './quota.js';
+import type { Account, ObservedWindow } from './quota.js';
 import type { Json, JsonObject, Named, PortRef, Resolver } from './refs.js';
 
 export interface Store<M extends string = never> extends Named {
@@ -96,6 +96,7 @@ export interface ModelResponse {
   readonly halt?: { readonly halt: string; readonly ask: string };
   readonly recorded?: readonly { readonly journal: string; readonly text: string; readonly when: StoredScope }[];
   readonly cooldownUntil?: Date;
+  readonly windows?: readonly ObservedWindow[];
 }
 
 export type SessionStatus =
