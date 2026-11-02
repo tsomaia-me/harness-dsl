@@ -41,3 +41,16 @@ function shapeOf(node: FlowNode): unknown {
 export function flowVersion(flow: FlowDef<unknown, unknown, unknown, string, string>): string {
   return createHash('sha256').update(JSON.stringify({ name: flow.name, nodes: flow.nodes.map(shapeOf) })).digest('hex').slice(0, 16);
 }
+
+/** The node at an address, through `when` and `loop` subtrees; iteration suffixes are ignored. */
+export function nodeAt(flow: FlowDef<unknown, unknown, unknown, string, string>, addr: string): FlowNode | undefined {
+  let nodes: readonly FlowNode[] = flow.nodes;
+  let found: FlowNode | undefined;
+  for (const segment of addr.split('/')) {
+    const name = segment.replace(/\[\d+\]$/, '');
+    found = nodes.find((node) => node.name === name);
+    if (!found) return undefined;
+    nodes = found.type === 'when' || found.type === 'loop' ? found.nodes : [];
+  }
+  return found;
+}

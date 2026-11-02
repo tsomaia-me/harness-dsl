@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { z } from 'zod';
-import { H } from '../../src/dsl.js';
-import { RateLimitedError } from '../../src/quota.js';
+import { describe, expect, it } from 'vitest';
+import { AiSdkDriver } from '../../src/drivers/ai-sdk.js';
+import { ClaudeCliDriver } from '../../src/drivers/claude-cli.js';
+import { RateLimitedError } from '../../src/drivers/errors.js';
 import {
   anthropicRateLimits,
   composeRateLimits,
@@ -12,8 +12,7 @@ import {
   ietfRateLimits,
   openaiRateLimits,
 } from '../../src/rate-limits/index.js';
-import { HarnessStore } from '../../src/store.js';
-import type { DriverInvokeRequest, ExecutionContext, RateLimitAdapter } from '../../src/types.js';
+import type { DriverInvokeRequest, RateLimitAdapter } from '../../src/types.js';
 
 const NOW = Date.UTC(2026, 9, 31, 12, 0, 0);
 
@@ -38,7 +37,7 @@ function invokeRequest(): DriverInvokeRequest {
 }
 
 function cliEmitting(lines: readonly unknown[], exitCode = 0) {
-  return H.drivers.claudeCli({
+  return new ClaudeCliDriver({
     spawnBridge: async (_args, _env, _cwd, onLine) => {
       for (const line of lines) onLine(JSON.stringify(line));
       return { exitCode, stderr: '' };
@@ -161,12 +160,6 @@ describe('Rate-limit adapters', () => {
 });
 
 describe('Rate-limit detection in drivers', () => {
-  const tempDirs: string[] = [];
-
-  afterEach(() => {
-    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-  });
-
   it('reports both subscription windows from the claude CLI rate_limit_event', async () => {
     const driver = cliEmitting([
       capturedRateLimitEvent,
@@ -236,7 +229,7 @@ describe('Rate-limit detection in drivers', () => {
         }),
         { status: 429, headers: { 'content-type': 'application/json', 'retry-after-ms': '0' } },
       )) as typeof fetch;
-    const driver = H.drivers.aiSdk({ provider: 'google', apiKey: 'test-key', fetch: customFetch });
+    const driver = new AiSdkDriver({ provider: 'google', apiKey: 'test-key', fetch: customFetch });
     const before = Date.now();
     const error = await driver.invoke(invokeRequest()).catch((err: unknown) => err);
     expect.soft(error).toBeInstanceOf(RateLimitedError);
@@ -258,7 +251,7 @@ describe('Rate-limit detection in drivers', () => {
         },
       });
     }) as typeof fetch;
-    const driver = H.drivers.aiSdk({ provider: 'openai', apiKey: 'test-key', fetch: customFetch });
+    const driver = new AiSdkDriver({ provider: 'openai', apiKey: 'test-key', fetch: customFetch });
 
     const error = await driver.invoke(invokeRequest()).catch((err: unknown) => err);
     expect.soft(calls).toBeGreaterThan(1);
@@ -266,42 +259,5 @@ describe('Rate-limit detection in drivers', () => {
     expect.soft((error as RateLimitedError).quota.windows).toEqual([
       { id: 'openai:requests', utilization: 1, resetsAtMs: expect.any(Number) },
     ]);
-  });
-
-  it('cools an account down for its policy default when the rate limit names no reset, then fails over', async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'harness-rl-test-'));
-    tempDirs.push(dir);
-    const store = new HarnessStore(dir);
-    store.createRun({ id: 'run-rl', flowName: 'f', workDir: dir, input: {} });
-    const ctx: ExecutionContext = {
-      runId: 'run-rl',
-      iteration: 0,
-      stepName: 'step',
-      projectDir: dir,
-      workDir: dir,
-      touchedPaths: [],
-      store,
-      signal: new AbortController().signal,
-    };
-    const limited = H.account(
-      'limited',
-      H.drivers.custom({
-        invoke: async (req) => {
-          throw new RateLimitedError(req.accountId, 'limited, no reset given');
-        },
-      }),
-    ).quotaPolicy({ defaultCooldownMs: 300_000 });
-    const healthy = H.account('healthy', H.drivers.mock({ responses: [{ structuredOutput: { ok: true } }] }));
-    const agent = H.agent('worker').model(
-      H.model(H.pool('p', [limited, healthy]).strategy('priority'), 'model-x'),
-    );
-    const skill = H.skill('s').input(z.object({})).output(z.object({ ok: z.boolean() }));
-
-    const startedAt = Date.now();
-    await expect(agent.run(skill).execute({}, ctx)).resolves.toEqual({ ok: true });
-    const cooldown = store.getAccountQuota('limited')?.cooldownUntilMs ?? 0;
-    expect.soft(cooldown).toBeGreaterThanOrEqual(startedAt + 300_000);
-    expect.soft(cooldown).toBeLessThan(startedAt + 360_000);
-    store.close();
   });
 });

@@ -1,17 +1,3 @@
-import type { z } from 'zod';
-import type { HarnessStore } from './store.js';
-
-export type HeadCapability =
-  | 'workflows:read'
-  | 'workflows:control'
-  | 'tickets:read'
-  | 'tickets:write'
-  | 'blockers:resolve'
-  | 'lessons:manage'
-  | 'accounts:manage'
-  | 'telemetry:read'
-  | 'runner:exec';
-
 export interface QuotaWindow {
   readonly id: string;
   readonly utilization: number;
@@ -65,26 +51,6 @@ export interface PricingAdapter {
   estimate(modelId: string, usage: TokenCounts, atMs: number): number | null;
 }
 
-export interface ExecutionContext {
-  readonly runId: string;
-  readonly iteration: number;
-  readonly stepName: string;
-  readonly projectDir: string;
-  readonly workDir: string;
-  readonly touchedPaths: readonly string[];
-  readonly store: HarnessStore;
-  readonly hookReceiver?: HookReceiver;
-  readonly signal: AbortSignal;
-}
-
-export interface Executable<TInput = any, TOutput = any> {
-  readonly kind: 'command' | 'agent-skill' | 'flow' | 'batch';
-  readonly name: string;
-  readonly inputSchema: z.ZodType<TInput>;
-  readonly outputSchema: z.ZodType<TOutput>;
-  execute(input: TInput, ctx: ExecutionContext): Promise<TOutput>;
-}
-
 export interface DriverInvokeRequest {
   readonly accountId: string;
   readonly modelId: string;
@@ -95,7 +61,6 @@ export interface DriverInvokeRequest {
   readonly outputJsonSchema: Record<string, unknown>;
   readonly workDir: string;
   readonly allowedTools?: readonly string[];
-  readonly customTools?: ReadonlyMap<string, Executable<any, any>>;
   readonly maxContextTokens?: number;
   readonly handoffBufferTokens?: number;
   readonly isIncomplete?: (structuredOutput: unknown) => boolean;
@@ -160,20 +125,6 @@ export interface Driver {
   readonly batch?: BatchAdapter;
 }
 
-export interface ResolvedAccount {
-  readonly accountId: string;
-  readonly driver: Driver;
-  readonly maxQuotaShare: number;
-  readonly quotaPolicy: QuotaPolicy;
-}
-
-export interface AccountProvider {
-  readonly id: string;
-  readonly maxQuotaShareValue: number;
-  maxQuotaShare(ratio: number): this;
-  acquireAccount(store: HarnessStore): Promise<ResolvedAccount>;
-}
-
 export interface CommandExecResult {
   readonly exitCode: number;
   readonly stdout: string;
@@ -232,66 +183,4 @@ export interface HookProtocol {
   parse(payload: Record<string, unknown>): ToolEvent | null;
   formatDecision(event: ToolEvent, decision: HookDecision): Record<string, unknown>;
   readContextTokens(transcriptPath: string): number;
-}
-
-export interface HookRegistration {
-  readonly runId: string;
-  readonly workDir: string;
-  readonly protocol: HookProtocol;
-  readonly plugins: readonly AgentPlugin[];
-  readonly customTools: ReadonlyMap<string, Executable<any, any>>;
-}
-
-export interface HookReceiver {
-  readonly url: string;
-  register(invocationId: string, registration: HookRegistration): void;
-  unregister(invocationId: string): void;
-}
-
-export interface PluginContext {
-  readonly runId: string;
-  readonly invocationId: string;
-  readonly store: HarnessStore;
-  readonly workDir: string;
-}
-
-export interface PluginHandler {
-  handle(event: ToolEvent, ctx: PluginContext): Promise<HookDecision>;
-}
-
-export interface AgentPlugin {
-  readonly name: string;
-  readonly preTool?: PluginHandler & { readonly intents: readonly ToolIntent[] };
-  readonly stop?: PluginHandler;
-}
-
-export interface FlowMiddleware {
-  readonly name: string;
-  wrap<TInput, TOutput>(
-    input: TInput,
-    ctx: ExecutionContext,
-    next: (updatedCtx: ExecutionContext) => Promise<TOutput>,
-  ): Promise<TOutput>;
-}
-
-export interface LessonEntry {
-  readonly id: string;
-  readonly kind: 'domain' | 'behavioral';
-  readonly roles: readonly string[];
-  readonly paths: readonly string[];
-  readonly rule: string;
-  readonly createdAt: string;
-}
-
-export interface FlowContext<
-  TInput = unknown,
-  TSteps extends Record<string, any> = Record<string, unknown>,
-> {
-  readonly runId: string;
-  readonly iteration: number;
-  readonly input: TInput;
-  readonly steps: TSteps;
-  readonly prev?: TSteps;
-  readonly resolutions: readonly unknown[];
-  readonly workDir: string;
 }

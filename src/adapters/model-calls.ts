@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { ModelRequest, ModelResponse, StoredScope } from '../kernel/backends.js';
 import { AccountRefusedError, type ObservedWindow } from '../kernel/quota.js';
 import type { Json, JsonObject } from '../kernel/refs.js';
-import { AccountUnavailableError, RateLimitedError } from '../quota.js';
+import { AccountUnavailableError, RateLimitedError } from '../drivers/errors.js';
 import type { QuotaPatch, TokenUsage } from '../types.js';
 
 /** How long an account rests after a rate limit that names no reset, and after a failed login. */

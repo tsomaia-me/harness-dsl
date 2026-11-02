@@ -2,7 +2,7 @@ import { tmpdir } from 'node:os';
 import { MockLanguageModelV3 } from 'ai/test';
 import { describe, expect, it } from 'vitest';
 import { anthropicBatchAdapter } from '../../src/batch/anthropic.js';
-import { H } from '../../src/dsl.js';
+import { AiSdkDriver } from '../../src/drivers/ai-sdk.js';
 import { anthropicPricing } from '../../src/pricing/index.js';
 import { anthropicPreset, googlePreset, openaiPreset } from '../../src/presets/index.js';
 import type { DriverInvokeRequest, PricingAdapter } from '../../src/types.js';
@@ -33,7 +33,7 @@ function invokeRequest(modelId: string): DriverInvokeRequest {
 describe('Provider presets', () => {
   it('runs any AI SDK model through a user preset, with no first-party pricing or key lookup', async () => {
     const seenModelIds: string[] = [];
-    const driver = H.drivers.aiSdk({
+    const driver = new AiSdkDriver({
       provider: {
         name: 'in-house',
         createModel: (modelId) => {
@@ -170,7 +170,7 @@ describe('Anthropic batch adapter', () => {
       usage: { input_tokens: 1_000, cache_read_input_tokens: 0, output_tokens: 200 },
       content: [{ type: 'text', text: '{"severity":"low"}' }],
     });
-    const driver = H.drivers.aiSdk({ provider: 'anthropic', apiKey: 'k', fetch: fetchFn, pricing: driverPricing });
+    const driver = new AiSdkDriver({ provider: 'anthropic', apiKey: 'k', fetch: fetchFn, pricing: driverPricing });
     const { batchId } = await driver.batch!.submit(
       [{ customId: 'item-0', systemPrompt: 'Audit', userPrompt: 'x', outputJsonSchema: SCHEMA }],
       'claude-opus-5-5',
@@ -181,7 +181,7 @@ describe('Anthropic batch adapter', () => {
   });
 
   it('is the anthropic driver default and can be turned off', () => {
-    expect.soft(H.drivers.aiSdk({ provider: 'anthropic', apiKey: 'k' }).batch).toBeDefined();
-    expect.soft(H.drivers.aiSdk({ provider: 'anthropic', apiKey: 'k', batch: false }).batch).toBeUndefined();
+    expect.soft(new AiSdkDriver({ provider: 'anthropic', apiKey: 'k' }).batch).toBeDefined();
+    expect.soft(new AiSdkDriver({ provider: 'anthropic', apiKey: 'k', batch: false }).batch).toBeUndefined();
   });
 });

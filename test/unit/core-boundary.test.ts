@@ -1,13 +1,12 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 const SRC = path.join(import.meta.dirname, '../../src');
-const CORE_FILES = ['dsl', 'engine', 'hooks', 'defaults', 'mcp', 'quota', 'runner', 'schema', 'store', 'types'];
-const PLUGIN_FILES = readdirSync(path.join(SRC, 'plugins')).map((file) => `plugins/${file.replace(/\.ts$/, '')}`);
-const COMPOSITION_ROOT = 'dsl';
-const ADAPTER_DIRS = ['batch', 'drivers', 'presets', 'pricing', 'protocols', 'rate-limits'];
+const CORE_DIRS = ['kernel', 'dsl', 'engine'];
+const ADAPTER_PREFIXES = ['adapters/', 'drivers/', 'batch/', 'presets/', 'pricing/', 'protocols/', 'rate-limits/'];
+const ADAPTER_FILES = ['runner', 'types', 'hooks', 'defaults'];
 const PROVIDER_VOCABULARY = [
   'anthropic',
   'claude',
@@ -15,9 +14,6 @@ const PROVIDER_VOCABULARY = [
   'gemini',
   'x-ratelimit',
   'retry-after',
-  'port_api',
-  'port_web',
-  'port_admin',
   'tool_input',
   'hookspecificoutput',
   'hook_event_name',
@@ -25,7 +21,15 @@ const PROVIDER_VOCABULARY = [
   'edit|write',
   'mcpservers',
 ];
-const KNOWN_UNTIL_HEAD_CLIENT_ADAPTER: Readonly<Record<string, readonly string[]>> = { mcp: ['mcpservers'] };
+
+function filesUnder(dir: string): string[] {
+  return readdirSync(path.join(SRC, dir)).flatMap((entry) => {
+    const full = path.join(SRC, dir, entry);
+    return statSync(full).isDirectory() ? filesUnder(`${dir}/${entry}`) : entry.endsWith('.ts') ? [`${dir}/${entry.replace(/\.ts$/, '')}`] : [];
+  });
+}
+
+const CORE_FILES = [...CORE_DIRS.flatMap(filesUnder), 'index'];
 
 function relativeImports(file: string): string[] {
   const source = readFileSync(path.join(SRC, `${file}.ts`), 'utf8');
@@ -36,49 +40,18 @@ function relativeImports(file: string): string[] {
     .map((specifier) => path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier)).replace(/\.js$/, ''));
 }
 
-function reachableAdapterModules(entry: string): string[] {
-  const seen = new Set<string>();
-  const queue = [entry];
-  const reached: string[] = [];
-  while (queue.length > 0) {
-    const file = queue.shift()!;
-    if (seen.has(file)) continue;
-    seen.add(file);
-    if (ADAPTER_DIRS.some((dir) => file.startsWith(`${dir}/`))) {
-      reached.push(file);
-      continue;
-    }
-    if (file === COMPOSITION_ROOT) continue;
-    queue.push(...relativeImports(file));
-  }
-  return reached;
+function adapterImports(file: string): string[] {
+  return relativeImports(file).filter((imported) => ADAPTER_PREFIXES.some((prefix) => imported.startsWith(prefix)) || ADAPTER_FILES.includes(imported));
 }
 
 function vocabularyIn(file: string): string[] {
   const source = readFileSync(path.join(SRC, `${file}.ts`), 'utf8');
-  const wiredNames =
-    file === COMPOSITION_ROOT
-      ? [...source.matchAll(/^import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+['"]\.\/(?:batch|drivers|presets|pricing|protocols|rate-limits)\//gm)].flatMap(
-          (match) => match[1]!.split(',').map((name) => name.replace(/^\s*type\s+/, '').trim()).filter(Boolean),
-        )
-      : [];
-  const body = wiredNames.reduce(
-    (code, name) => code.replaceAll(name, ''),
-    source.replace(/^(?:import|export)[\s\S]*?from\s+['"][^'"]+['"];?$/gm, ''),
-  );
-  const allowed = new Set(KNOWN_UNTIL_HEAD_CLIENT_ADAPTER[file] ?? []);
-  return PROVIDER_VOCABULARY.filter((term) => !allowed.has(term) && body.toLowerCase().includes(term));
+  const body = source.replace(/^(?:import|export)[\s\S]*?from\s+['"][^'"]+['"];?$/gm, '');
+  return PROVIDER_VOCABULARY.filter((term) => body.toLowerCase().includes(term));
 }
 
 describe('Core boundary', () => {
-  it.each(CORE_FILES)('src/%s.ts reaches no adapter module and names no provider, CLI or project', (file) => {
-    expect({
-      adapterModules: file === COMPOSITION_ROOT ? [] : reachableAdapterModules(file),
-      vocabulary: vocabularyIn(file),
-    }).toStrictEqual({ adapterModules: [], vocabulary: [] });
-  });
-
-  it.each(PLUGIN_FILES)('src/%s.ts names no provider, CLI or project', (file) => {
-    expect(vocabularyIn(file)).toStrictEqual([]);
+  it.each(CORE_FILES)('src/%s.ts imports no adapter module and names no provider, CLI or project', (file) => {
+    expect({ adapterModules: adapterImports(file), vocabulary: vocabularyIn(file) }).toStrictEqual({ adapterModules: [], vocabulary: [] });
   });
 });

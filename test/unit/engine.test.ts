@@ -36,18 +36,21 @@ class ScriptedDriver implements ModelDriver<'test'> {
   public readonly requests: ModelRequest[] = [];
   public readonly crashOnce = new Set<string>();
   public readonly finished = new Map<string, ModelResponse>();
+  /** Set when the agent finished but the harness dies before recording it: the next clock read throws. */
+  public powerOffPending = false;
   public constructor(private readonly respond: (request: ModelRequest) => ModelResponse) {}
   public serves() {
     return true;
   }
   public async invoke(request: ModelRequest): Promise<ModelResponse> {
     this.requests.push(request);
+    const response = this.respond(request);
     if (this.crashOnce.has(request.seat)) {
       this.crashOnce.delete(request.seat);
-      this.finished.set(request.idempotencyKey, this.respond(request));
-      throw new PowerOff(`power off during ${request.seat}`);
+      this.finished.set(request.idempotencyKey, response);
+      this.powerOffPending = true;
     }
-    return this.respond(request);
+    return response;
   }
   public async session(key: string) {
     const response = this.finished.get(key);
@@ -125,7 +128,13 @@ describe('the engine over the ledger', () => {
   let runner: ScriptedRunner;
   let driver: ScriptedDriver;
   let clock: Date;
-  const now = () => clock;
+  const now = () => {
+    if (driver.powerOffPending) {
+      driver.powerOffPending = false;
+      throw new PowerOff('power off after the agent finished, before the harness recorded it');
+    }
+    return clock;
+  };
 
   beforeEach(() => {
     dir = mkdtempSync(path.join(tmpdir(), 'harness-engine-'));
@@ -198,7 +207,7 @@ describe('the engine over the ledger', () => {
   });
 
   it('replays after a power cut in a repeatable step: the finished step is not rerun, the running one is, the attempt is the same', async () => {
-    const a = runtime('a', { ttl: 50 });
+    const a = runtime('a', { ttl: 200 });
     await a.start();
     const unitId = await startRelease(a);
     runner.crashOnce.add('announce');
@@ -206,7 +215,7 @@ describe('the engine over the ledger', () => {
     const attemptId = (await a.record(unitId)).unit.attempt!.id;
     expect(runner.calls).toEqual(['build', 'announce']);
 
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await new Promise((resolve) => setTimeout(resolve, 250));
     const b = runtime('b');
     await b.start();
     expect((await b.record(unitId)).unit.attempt).toMatchObject({ id: attemptId, status: 'blocked', blockedOn: 'interrupted' });
@@ -222,18 +231,18 @@ describe('the engine over the ledger', () => {
   });
 
   it('reruns a repeatable step that was running at the cut, and asks the driver about an agent whose session finished while down', async () => {
-    const a = runtime('a', { ttl: 50 });
+    const a = runtime('a', { ttl: 200 });
     await a.start();
     const unitId = await startRelease(a);
     runner.crashOnce.add('build');
     await expect(a.startAttempt(unitId)).rejects.toBeInstanceOf(PowerOff);
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    const b = runtime('b', { ttl: 50 });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const b = runtime('b', { ttl: 200 });
     driver.crashOnce.add('reviewer');
     await expect(b.start()).rejects.toBeInstanceOf(PowerOff);
     expect(runner.calls).toEqual(['build', 'build', 'announce']);
     expect(driver.requests).toHaveLength(1);
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await new Promise((resolve) => setTimeout(resolve, 250));
     const c = runtime('c');
     await c.start();
     expect((await c.record(unitId)).unit.attempt).toMatchObject({ status: 'blocked', blockedOn: 'decision', step: 'approval' });

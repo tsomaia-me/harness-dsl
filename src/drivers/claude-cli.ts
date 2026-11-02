@@ -7,7 +7,7 @@ import { DEFAULT_HANDOFF_BUFFER_TOKENS } from '../defaults.js';
 import { hookEndpointUrl } from '../hooks.js';
 import { anthropicPricing } from '../pricing/anthropic.js';
 import { claudeCodeHookProtocol } from '../protocols/claude-code.js';
-import { AccountUnavailableError, RateLimitedError } from '../quota.js';
+import { AccountUnavailableError, RateLimitedError } from './errors.js';
 import { ANTHROPIC_5H_WINDOW, ANTHROPIC_7D_WINDOW } from '../rate-limits/anthropic.js';
 import {
   CLAUDE_CLI_AUTH_FAILURE_TEXT,
@@ -88,12 +88,7 @@ export class ClaudeCliDriver implements Driver {
     this.probeQuota = opts?.probeQuota;
   }
 
-  public buildCliArgs(
-    req: DriverInvokeRequest,
-    sessionId: string,
-    settingsFilePath?: string,
-    mcpConfigFilePath?: string,
-  ): string[] {
+  public buildCliArgs(req: DriverInvokeRequest, sessionId: string, settingsFilePath?: string): string[] {
     const sessionFlags = req.resumeSession
       ? ['--resume', sessionId]
       : ['--session-id', sessionId];
@@ -114,21 +109,12 @@ export class ClaudeCliDriver implements Driver {
       args.push('--append-system-prompt', req.systemPrompt);
     }
 
-    const customToolNames = req.customTools
-      ? Array.from(req.customTools.keys()).map((name) => `mcp__harness__${name}`)
-      : [];
-    const combinedAllowedTools = [...(req.allowedTools ?? []), ...customToolNames];
-
-    if (combinedAllowedTools.length > 0) {
-      args.push('--allowedTools', combinedAllowedTools.join(','));
+    if (req.allowedTools && req.allowedTools.length > 0) {
+      args.push('--allowedTools', req.allowedTools.join(','));
     }
 
     if (settingsFilePath) {
       args.push('--settings', settingsFilePath);
-    }
-
-    if (mcpConfigFilePath) {
-      args.push('--mcp-config', mcpConfigFilePath);
     }
 
     args.push('--strict-mcp-config', req.userPrompt);
@@ -138,7 +124,6 @@ export class ClaudeCliDriver implements Driver {
   public async invoke(req: DriverInvokeRequest): Promise<DriverInvokeResult> {
     const sessionId = req.sessionId ?? randomUUID();
     let settingsFilePath: string | undefined;
-    let mcpConfigFilePath: string | undefined;
 
     const subscriptions = req.hookSubscriptions;
     if (
@@ -160,25 +145,7 @@ export class ClaudeCliDriver implements Driver {
       writeFileSync(settingsFilePath, JSON.stringify(settingsPayload, null, 2), 'utf8');
     }
 
-    if (req.hookServerUrl && req.customTools && req.customTools.size > 0) {
-      const settingsDir = path.join(tmpdir(), 'harness-cli-settings');
-      mkdirSync(settingsDir, { recursive: true });
-      mcpConfigFilePath = path.join(
-        settingsDir,
-        `mcp-${req.runId}-${req.stepName}-${randomUUID()}.json`,
-      );
-      const mcpPayload = {
-        mcpServers: {
-          harness: {
-            type: 'http',
-            url: `${req.hookServerUrl.replace(/\/$/, '')}/mcp`,
-          },
-        },
-      };
-      writeFileSync(mcpConfigFilePath, JSON.stringify(mcpPayload, null, 2), 'utf8');
-    }
-
-    const args = this.buildCliArgs(req, sessionId, settingsFilePath, mcpConfigFilePath);
+    const args = this.buildCliArgs(req, sessionId, settingsFilePath);
     const env: Record<string, string> = {
       ...this.extraEnv,
     };
@@ -388,9 +355,6 @@ export class ClaudeCliDriver implements Driver {
     } finally {
       if (settingsFilePath) {
         rmSync(settingsFilePath, { force: true });
-      }
-      if (mcpConfigFilePath) {
-        rmSync(mcpConfigFilePath, { force: true });
       }
     }
   }

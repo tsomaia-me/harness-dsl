@@ -3,7 +3,7 @@ import { APICallError, generateText, jsonSchema, type LanguageModel, Output, Ret
 import { anthropicPreset } from '../presets/anthropic.js';
 import { googlePreset } from '../presets/google.js';
 import { openaiPreset } from '../presets/openai.js';
-import { AccountUnavailableError, RateLimitedError } from '../quota.js';
+import { AccountUnavailableError, RateLimitedError } from './errors.js';
 import { ietfRateLimits } from '../rate-limits/ietf.js';
 import type {
   BatchAdapter,

@@ -2,8 +2,13 @@ import type {
   Client,
   Grant,
   Ledger,
+  LedgerEvent,
+  MemoryItem,
   MemoryStore,
   Model,
+  ModelDriver,
+  ModelRequest,
+  ModelResponse,
   Observer,
   QuotaPartition,
   RunnerBackend,
@@ -82,4 +87,42 @@ export function fakeRunner(name: string): RunnerDef {
 
 export function fakeWorkspace(name: string): WorkspaceDef {
   return defineWorkspace(name, workspaceBackend);
+}
+
+export class ScriptedDriver implements ModelDriver<'test'> {
+  public readonly name = 'test-driver';
+  public readonly driver = 'test' as const;
+  public readonly hooks = true;
+  public readonly requests: ModelRequest[] = [];
+  public constructor(private readonly respond: (request: ModelRequest) => ModelResponse) {}
+  public serves() {
+    return true;
+  }
+  public async invoke(request: ModelRequest): Promise<ModelResponse> {
+    this.requests.push(request);
+    return this.respond(request);
+  }
+}
+
+export class RecordingMemory implements MemoryStore {
+  public readonly entity = 'memoryStore' as const;
+  public readonly items: MemoryItem[] = [];
+  public constructor(public readonly name: string) {}
+  public async put(item: MemoryItem) {
+    this.items.push(item);
+  }
+  public async list(filter: { readonly journal: string; readonly status?: readonly MemoryItem['status'][] }) {
+    return this.items.filter((item) => item.journal === filter.journal && (!filter.status || filter.status.includes(item.status)));
+  }
+  public async update(id: string, change: Parameters<MemoryStore['update']>[1]) {
+    const at = this.items.findIndex((item) => item.id === id);
+    if (at === -1) return;
+    this.items[at] = { ...this.items[at]!, ...change };
+  }
+}
+
+export async function eventsOf(ledger: Ledger, type?: LedgerEvent['type']): Promise<LedgerEvent[]> {
+  const out: LedgerEvent[] = [];
+  for await (const { event } of ledger.read(type ? { types: [type] } : {})) out.push(event);
+  return out;
 }

@@ -33,7 +33,7 @@ export interface SshRunnerOptions extends LocalRunnerOptions {
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-function shellQuote(value: string): string {
+export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 

@@ -4,11 +4,27 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Intent } from '../../dsl/roles.js';
 import { ClaudeCliDriver, type ClaudeCliSpawnBridge } from '../../drivers/claude-cli.js';
-import type { Model, ModelDriver, ModelRequest, ModelResponse, SessionStatus } from '../../kernel/backends.js';
+import type { GuardProtocol, Model, ModelDriver, ModelRequest, ModelResponse, SessionStatus } from '../../kernel/backends.js';
 import type { Account, QuotaPartition } from '../../kernel/quota.js';
-import type { EnvRef, Resolver } from '../../kernel/refs.js';
+import type { EnvRef, JsonObject, Resolver } from '../../kernel/refs.js';
+import { claudeCodeHookProtocol } from '../../protocols/claude-code.js';
 import { parseWithDates, stringifyWithDates } from '../json-dates.js';
 import { DEFAULT_RATE_LIMIT_COOLDOWN_MS, DEFAULT_UNAVAILABLE_COOLDOWN_MS, envelopeSchema, refusalOf, sessionIdFor, systemPrompt, tokensOf, unpack, userPrompt, windowsOf } from '../model-calls.js';
+import { SessionDef, type SessionOptions, SupervisorClient, type SupervisorOptions } from './supervisor.js';
+
+export { SessionDef, SupervisorClient, type SessionOptions, type SupervisorOptions };
+
+/** The Claude Code hook payloads as the kernel's guard events: file writes and stops. */
+export const claudeCodeGuardProtocol: GuardProtocol = {
+  parse(payload: JsonObject) {
+    const event = claudeCodeHookProtocol.parse(payload);
+    if (!event || event.phase === 'post-tool') return null;
+    return { phase: event.phase, filePaths: event.filePaths, raw: payload };
+  },
+  formatDecision(event, decision) {
+    return claudeCodeHookProtocol.formatDecision({ phase: event.phase, intent: event.filePaths.length > 0 ? 'file-write' : null, filePaths: event.filePaths, raw: event.raw }, decision) as JsonObject;
+  },
+};
 
 export const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60_000;
 
@@ -40,6 +56,7 @@ export class ClaudeCodeDriver implements ModelDriver<'claude-code'> {
   public readonly name = 'claude-code';
   public readonly driver = 'claude-code' as const;
   public readonly hooks = true;
+  public readonly guardProtocol = claudeCodeGuardProtocol;
   private readonly inners = new Map<string, ClaudeCliDriver>();
   private readonly sessionDir: string;
 
@@ -87,7 +104,14 @@ export class ClaudeCodeDriver implements ModelDriver<'claude-code'> {
         outputJsonSchema: envelopeSchema(request),
         workDir: request.workspacePath ?? this.options.workDir ?? process.cwd(),
         ...(allowedTools.length > 0 ? { allowedTools } : {}),
-        runId: request.idempotencyKey,
+        ...(request.guard
+          ? {
+              hookServerUrl: request.guard.endpoint,
+              invocationId: request.guard.invocation,
+              hookSubscriptions: { preToolIntents: request.guard.leases ? (['file-write'] as const) : [], stop: request.guard.stop },
+            }
+          : {}),
+        runId: request.idempotencyKey.replace(/[^A-Za-z0-9_.-]/g, '_'),
         stepName: request.seat,
         sessionId: request.resume?.sessionId ?? sessionIdFor(request.idempotencyKey),
         resumeSession: request.resume !== undefined,
@@ -126,5 +150,13 @@ export const claudeCode = {
   },
   driver(options?: ClaudeCodeDriverOptions): ClaudeCodeDriver {
     return new ClaudeCodeDriver(options);
+  },
+  /** A Claude Code session as a client: the granted operations as MCP tools. */
+  supervisor(name: string, options: SupervisorOptions): SupervisorClient {
+    return new SupervisorClient(name, options);
+  },
+  /** One session over several harnesses; writes the `.mcp.json` naming each supervisor. */
+  session(name: string, options: SessionOptions): SessionDef {
+    return new SessionDef(name, options);
   },
 };

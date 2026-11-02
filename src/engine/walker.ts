@@ -20,7 +20,7 @@ import { modelsOf, type AnySeat } from './seats.js';
 
 export type WalkOutcome =
   | { readonly kind: 'exit'; readonly exit: string }
-  | { readonly kind: 'blocked'; readonly step: string; readonly on: 'decision' | 'timer' | 'children' | 'job' | 'interrupted' | 'budget'; readonly halt?: HaltDef<string, unknown>; readonly ask?: string; readonly facets?: readonly StoredFacetValue[]; readonly detail?: string; readonly resumeAt?: Date }
+  | { readonly kind: 'blocked'; readonly step: string; readonly on: 'decision' | 'timer' | 'children' | 'job' | 'interrupted' | 'budget'; readonly halt?: HaltDef<string, unknown>; readonly ask?: string; readonly facets?: readonly StoredFacetValue[]; readonly detail?: string; readonly resumeAt?: Date; readonly clocks?: { readonly escalateMinutes?: number; readonly timeoutMinutes?: number } }
   | { readonly kind: 'failed'; readonly step: string; readonly error: string };
 
 class Blocked {
@@ -333,6 +333,19 @@ class Walker {
     };
   }
 
+  private guardFor(seat: AnySeat, driver: ModelDriver, options: StepOptions, workspacePath: string, key: string, addr: string): NonNullable<ModelRequest['guard']> {
+    if (!driver.guardProtocol) throw new StepFailed({ kind: 'failed', step: addr, error: `driver "${driver.name}" has no guard protocol for the guarded step "${addr}"` });
+    return this.runtime.registerGuard(key, {
+      attemptId: this.input.attemptId,
+      seat: seat.name,
+      protocol: driver.guardProtocol,
+      workspacePath,
+      areas: options.workspace?.areas ?? {},
+      leases: options.guard?.leases !== undefined,
+      ...(options.guard?.beforeStop ? { beforeStop: options.guard.beforeStop } : {}),
+    });
+  }
+
   private usageOf(response: ModelResponse): QuotaEventBody[] {
     const at = this.runtime.now();
     return [
@@ -359,8 +372,11 @@ class Walker {
       try {
         return { account, number, result: await call(account) };
       } catch (err) {
-        if (!(err instanceof AccountRefusedError)) throw err;
         const at = this.runtime.now();
+        if (!(err instanceof AccountRefusedError)) {
+          await this.append([{ type: 'invocation', attemptId: this.input.attemptId, step: addr, number, executable: seat.name, seat: seat.name, model: model.name, account: account.name, viaJob, ok: false, costUsd: 0, durationMs: Math.max(0, at.getTime() - startedAt.getTime()), at }]);
+          throw new StepFailed({ kind: 'failed', step: addr, error: `seat "${seat.name}" failed: ${err instanceof Error ? err.message : String(err)}` });
+        }
         await this.runtime.quotaEvents(account, [
           { type: 'cooldown', until: err.until, reason: `${err.refusal}: ${err.message}`, at },
           ...err.windows.map((window) => ({ type: 'windowObserved' as const, window: window.window, utilization: window.utilization, resetsAt: window.resetsAt, at })),
@@ -392,9 +408,15 @@ class Walker {
         ? { sessionId: recorded.sessionId, halt: this.input.memo.blocked?.halt ?? '', decision: this.input.resume.decision }
         : undefined;
       const workspacePath = options.workspace ? (await options.workspace.backend.prepare(this.input.attemptId)).path : undefined;
-      const call = await this.withAccount(seat, model, addr, false, (account) =>
-        driver.invoke(this.request(seat, model, account, input, recalled.items, options, key, { ...(resume ? { resume } : {}), ...(workspacePath ? { workspacePath } : {}) }), this.runtime.resolver),
-      );
+      const guard = options.guard && workspacePath ? this.guardFor(seat, driver, options, workspacePath, key, addr) : undefined;
+      let call;
+      try {
+        call = await this.withAccount(seat, model, addr, false, (account) =>
+          driver.invoke(this.request(seat, model, account, input, recalled.items, options, key, { ...(resume ? { resume } : {}), ...(workspacePath ? { workspacePath } : {}), ...(guard ? { guard } : {}) }), this.runtime.resolver),
+        );
+      } finally {
+        if (guard) this.runtime.unregisterGuard(key);
+      }
       response = call.result;
       await this.runtime.quotaEvents(call.account, this.usageOf(response));
       await this.append([
@@ -568,7 +590,8 @@ class Walker {
       }
     }
     await this.visit(addr, iteration);
-    throw new Blocked({ kind: 'blocked', step: addr, on: 'decision', halt: node.halt, ask: options.ask(this.ctx()), facets });
+    const clocks = { ...(options.escalate ? { escalateMinutes: options.escalate.afterMinutes } : {}), ...(options.timeout ? { timeoutMinutes: options.timeout.afterMinutes } : {}) };
+    throw new Blocked({ kind: 'blocked', step: addr, on: 'decision', halt: node.halt, ask: options.ask(this.ctx()), facets, ...(Object.keys(clocks).length > 0 ? { clocks } : {}) });
   }
 
   private async spawn(node: Extract<FlowNode, { type: 'spawn' }>, addr: string, iteration: number): Promise<readonly ChildResult[]> {

@@ -25,7 +25,7 @@ export type LedgerEvent =
   | { readonly type: 'attemptRewound'; readonly attemptId: string; readonly from: string; readonly to: string; readonly signal: string; readonly at: Date }
   | { readonly type: 'attemptInterrupted'; readonly attemptId: string; readonly step: string; readonly holder: string; readonly at: Date }
   | { readonly type: 'attemptRecovered'; readonly attemptId: string; readonly action: 'restartFromTop' | 'abandon' | 'continue'; readonly by: string; readonly at: Date }
-  | { readonly type: 'attemptEnded'; readonly attemptId: string; readonly outcome: AttemptOutcome; readonly exit?: string; readonly costUsd: number; readonly at: Date }
+  | { readonly type: 'attemptEnded'; readonly attemptId: string; readonly outcome: AttemptOutcome; readonly exit?: string; readonly detail?: string; readonly costUsd: number; readonly at: Date }
   | { readonly type: 'retryScheduled'; readonly unitId: string; readonly failedAttempts: number; readonly notBefore: Date; readonly at: Date }
   | { readonly type: 'loopIteration'; readonly unitId: string; readonly attemptId: string; readonly loop: string; readonly iteration: number; readonly span: LoopSpan; readonly carry?: Json; readonly at: Date }
   | { readonly type: 'decisionRecorded'; readonly attemptId: string; readonly step: string; readonly halt: string; readonly decision: Json; readonly resolvedBy: ResolvedBy; readonly by: string; readonly facets?: readonly StoredFacetValue[]; readonly reads?: readonly MetricRead[]; readonly at: Date }
@@ -52,6 +52,7 @@ export type LedgerEvent =
   | { readonly type: 'orderHeld'; readonly unitId: string; readonly predecessorKey: string; readonly reason: string; readonly at: Date }
   | { readonly type: 'leaseTaken'; readonly attemptId: string; readonly resource: string; readonly mode: LeaseMode; readonly waitedMs: number; readonly at: Date }
   | { readonly type: 'leaseReleased'; readonly attemptId: string; readonly resource: string; readonly at: Date }
+  | { readonly type: 'accountShared'; readonly account: string; readonly fraction: number; readonly by: string; readonly at: Date }
   | { readonly type: 'triggersProcessed'; readonly upToSeq: number; readonly at: Date };
 
 export type LedgerEventType = LedgerEvent['type'];

@@ -4,6 +4,23 @@ import type { Metrics } from './metrics.js';
 import type { Account, ObservedWindow } from './quota.js';
 import type { Json, JsonObject, Named, PortRef, Resolver } from './refs.js';
 
+/** A guarded seat's tool event, as the driver's protocol parses it from the agent's hook payload. */
+export interface GuardEvent {
+  readonly phase: 'pre-tool' | 'stop';
+  readonly filePaths: readonly string[];
+  readonly raw: JsonObject;
+}
+
+export interface GuardDecision {
+  readonly allow: boolean;
+  readonly reason?: string;
+}
+
+export interface GuardProtocol {
+  parse(payload: JsonObject): GuardEvent | null;
+  formatDecision(event: GuardEvent, decision: GuardDecision): JsonObject;
+}
+
 export interface Store<M extends string = never> extends Named {
   readonly entity: 'store';
   readonly _statesMapTo?: M;
@@ -86,6 +103,8 @@ export interface ModelRequest {
   readonly workspacePath?: string;
   readonly idempotencyKey: string;
   readonly resume?: { readonly sessionId: string; readonly halt: string; readonly decision: Json };
+  /** Set on a guarded step: the agent's hooks post to `endpoint` with `?invocation=<invocation>`. */
+  readonly guard?: { readonly endpoint: string; readonly invocation: string; readonly leases: boolean; readonly stop: boolean };
 }
 
 export interface ModelResponse {
@@ -107,6 +126,7 @@ export type SessionStatus =
 export interface ModelDriver<D extends string = string> extends Named {
   readonly driver: D;
   readonly hooks: boolean;
+  readonly guardProtocol?: GuardProtocol;
   serves(account: Account): boolean;
   invoke(request: ModelRequest, resolver: Resolver): Promise<ModelResponse>;
   session?(idempotencyKey: string, resolver: Resolver): Promise<SessionStatus>;
@@ -168,6 +188,6 @@ export interface Observer extends Named {
   readonly entity: 'observer';
   observe(
     event: SequencedEvent,
-    query: { unit(id: string): Promise<UnitRecord | undefined>; readonly metrics: Metrics },
+    query: { unit(id: string): Promise<UnitRecord | undefined>; readonly metrics: Metrics; readonly resolver: Resolver },
   ): Promise<void>;
 }
