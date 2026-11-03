@@ -65,8 +65,11 @@ const blockingOf = (records: Records): string[] => (records ? [...records.review
 
 export function crookedHarness(options: CrookedHarnessOptions) {
   const quota = sqlite.quota('claude', { path: path.join(options.stateDir, 'quota.sqlite') });
-  const max = claudeCode.subscription('max', { quota });
-  const subs = H.pool('subs').accounts(max);
+  // The owner's three Max subscriptions, each signed in at its own Claude Code configuration directory.
+  const max1 = claudeCode.subscription('max-1', { configDir: H.env('CLAUDE_CONFIG_DIR_1'), quota });
+  const max2 = claudeCode.subscription('max-2', { configDir: H.env('CLAUDE_CONFIG_DIR_2'), quota });
+  const max3 = claudeCode.subscription('max-3', { configDir: H.env('CLAUDE_CONFIG_DIR_3'), quota });
+  const subs = H.pool('subs').accounts(max1, max2, max3);
   const opus = claudeCode.model('opus', { id: options.models?.opus ?? 'claude-opus-5-5' });
   const sonnet = claudeCode.model('sonnet', { id: options.models?.sonnet ?? 'claude-sonnet-5-5' });
   const builder = H.seat('builder').role(builderRole).model(opus).pool(subs);
@@ -76,7 +79,8 @@ export function crookedHarness(options: CrookedHarnessOptions) {
   const hotfix = H.seat('hotfix').role(hotfixRole).model(sonnet).pool(subs);
 
   const runner = local.runner('local', { maxConcurrentSlots: 2 });
-  const checks = H.command('checks').argv(['pnpm', 'test']).runner(runner).effect('repeatable');
+  // The product's own gate for a change: the tests of the packages it touches (running.md § CI and the queue).
+  const checks = H.command('checks').argv(['pnpm', 'check:touched', '--direct']).runner(runner).effect('repeatable');
   const journeys = H.command('journeys').argv(['pnpm', 'journeys']).runner(runner).effect('repeatable');
   const merge = H.command('merge').input(z.object({ sha: z.string() })).argv((i) => ['pnpm', 'queue', i.sha]).runner(runner).effect('external', async ({ input, exec }) => (await exec(['git', 'merge-base', '--is-ancestor', input.sha, 'origin/main'])).exitCode === 0);
   const workspace = git.worktree('worktree', { repo: options.repo, root: path.join(options.stateDir, 'worktrees') }).withAreas(Areas, { app: ['apps/app/**'], api: ['apps/api/**'], admin: ['apps/admin/**'], infra: ['infra/**'] });

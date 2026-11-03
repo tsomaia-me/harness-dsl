@@ -30,6 +30,7 @@ A new kernel. A flow is a declared tree of named steps, never an async function;
 
 - The coding loop on the signed-in Claude Code CLI: a guarded builder in a git worktree (area lease taken through the `PreToolUse` hook), the checks as a command, approval over the HTTP control API, the fix landed, board and telemetry written.
 - Support triage on the Anthropic API (a pool of three keys from one variable) and on the Gemini API: classification, a halt skipped by policy, a human decision over HTTP, the decisions folded into a metric.
+- The product harness (`examples/crooked`) on a clone of the product repository: an epic spawning its ticket, the builder in a guarded worktree on the product's own touched checks, the reviewer, verifier and judge in parallel, the fix-round loop, the owner's sign-off resolved over the supervisor's MCP, the ticket abandoned and the epic cancelled, with board and telemetry.
 - OpenRouter batches: submission, polling and collection, each item charged its share of the batch's reported cost. Right after creation the batch answers 404 for a moment, which the adapter reads as running; a poll that cannot reach the provider leaves the batch running.
 - A guarded step on the Gemini CLI: the hooks placed in the workspace's `.gemini/settings.json` (`tools.enableHooks`, `hooks.enabled`, `BeforeTool` on `write_file|replace`) reached the hook server live, the area lease was taken on the write, the checks passed, the fix landed.
 
