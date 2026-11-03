@@ -122,7 +122,7 @@ describe('LocalRunner & SshRunner Process Containment', () => {
   it('constructs agentless SSH ControlMaster arguments with setsid trap and enforces health check thresholds', async () => {
     const sshRunner = new SshRunner('wb2', {
       host: 'wb2',
-      workDir: '/srv/harness/CrookedDuke',
+      workDir: '/srv/harness/app',
       maxConcurrentSlots: 2,
       slotPortBase: 18100,
     });
@@ -133,11 +133,11 @@ describe('LocalRunner & SshRunner Process Containment', () => {
     const remoteScript = args[args.length - 1]!;
     expect.soft(remoteScript).toContain('setsid');
     expect.soft(remoteScript).toContain('kill -TERM -$$');
-    expect.soft(remoteScript).toContain('/srv/harness/CrookedDuke');
+    expect.soft(remoteScript).toContain('/srv/harness/app');
 
     const lowDiskRunner = new SshRunner('wb2-disk', {
       host: 'wb2',
-      workDir: '/srv/harness/CrookedDuke',
+      workDir: '/srv/harness/app',
       minFreeDiskGb: 20,
       healthProbeFn: async () => ({ freeDiskGb: 5.5, loadRatio: 0.4 }),
     });
@@ -145,7 +145,7 @@ describe('LocalRunner & SshRunner Process Containment', () => {
 
     const highLoadRunner = new SshRunner('wb2-load', {
       host: 'wb2',
-      workDir: '/srv/harness/CrookedDuke',
+      workDir: '/srv/harness/app',
       maxCpuLoadRatio: 2.0,
       healthProbeFn: async () => ({ freeDiskGb: 50, loadRatio: 3.5 }),
     });
