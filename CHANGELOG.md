@@ -35,7 +35,7 @@ A new kernel. A flow is a declared tree of named steps, never an async function;
 
 ### Not verified live
 
-- The Gemini batch endpoint answered `FAILED_PRECONDITION` to every request from the available key, a minimal one included; the adapter is verified against the documented shapes only.
+- The Gemini batch endpoint answered `FAILED_PRECONDITION` to every request from the available key, a minimal one included, which the docs tie to a project without billing. The adapter is verified field by field against the API's v1beta discovery document instead: the `{ batch }` request, the `Operation` envelope, the `BATCH_STATE_*` states, the inlined responses under the operation's response or the batch's output, the usage fields.
 
 ## 0.3.0
 

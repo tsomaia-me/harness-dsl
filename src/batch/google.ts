@@ -28,7 +28,12 @@ function parseText(response: Record<string, any> | undefined): unknown {
   }
 }
 
-/** Gemini batch mode with inline requests: one long-running operation per batch, polled until done, responses inline. */
+/**
+ * Gemini batch mode with inline requests, after the v1beta discovery document: `POST models/{model}:batchGenerateContent`
+ * with `{ batch: GenerateContentBatch }` answers an `Operation`; `GET {name}` polls it, its `metadata` is the batch
+ * (`state`, `batchStats`, `output`) and, once `done`, its `response` carries the `GenerateContentBatchOutput` whose
+ * `inlinedResponses.inlinedResponses` hold one `InlinedResponse` (`response` or `error`, `metadata.key`) per request.
+ */
 export function googleBatchAdapter(opts: GoogleBatchOptions): BatchAdapter {
   const fetchFn = opts.fetch ?? globalThis.fetch;
   const base = (opts.baseURL ?? GOOGLE_BATCH_DEFAULTS.baseURL).replace(/\/$/, '');
@@ -70,11 +75,12 @@ export function googleBatchAdapter(opts: GoogleBatchOptions): BatchAdapter {
       const res = await fetchForPoll(fetchFn, `${base}/${batchId}`, { headers: headers() });
       if (!res) return { status: 'running' };
       if (!res.ok) throw new Error(`Gemini batch poll failed (${res.status})`);
-      const data = (await res.json()) as { done?: boolean; error?: unknown; metadata?: { state?: string }; state?: string; response?: Record<string, any> };
+      const data = (await res.json()) as { done?: boolean; error?: unknown; metadata?: { state?: string; output?: Record<string, any> }; state?: string; response?: Record<string, any> };
       const state = data.metadata?.state ?? data.state ?? '';
       if (FAILED_STATES.has(state) || (data.done && data.error && !data.response)) return { status: 'failed' };
-      if (!data.done || !data.response) return { status: 'running' };
-      const inlined = (data.response.inlinedResponses?.inlinedResponses ?? data.response.inlinedResponses ?? []) as readonly Record<string, any>[];
+      const output = data.response?.output ?? data.response ?? data.metadata?.output;
+      if (!data.done || !output) return { status: 'running' };
+      const inlined = (output.inlinedResponses?.inlinedResponses ?? output.inlinedResponses ?? []) as readonly Record<string, any>[];
       const pricing = pricingByBatch.get(batchId) ?? opts.pricing;
       const order = orderByBatch.get(batchId);
       pricingByBatch.delete(batchId);
