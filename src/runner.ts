@@ -10,6 +10,8 @@ export interface LocalRunnerOptions {
   readonly id?: string;
   readonly maxConcurrentSlots?: number;
   readonly slotPortBase?: number;
+  readonly portsPerSlot?: number;
+  readonly slotEnv?: (slotIndex: number, ports: readonly number[]) => Record<string, string>;
   readonly timeoutMs?: number;
   readonly inactivityTimeoutMs?: number;
 }
@@ -25,8 +27,16 @@ export interface SshRunnerOptions extends LocalRunnerOptions {
   readonly maxCpuLoadRatio?: number;
   readonly minFreeDiskGb?: number;
   readonly sshBinary?: string;
+  /** The private key `ssh -i` signs in with; the agent's keys serve when none is given. */
+  readonly identityFile?: string;
   readonly skipPreFlightCheck?: boolean;
   readonly healthProbeFn?: (host: string, workDir: string) => Promise<SshHealthSnapshot>;
+}
+
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 export class InactivityTimeoutError extends Error {
@@ -99,6 +109,8 @@ abstract class BaseSlotRunner implements Runner {
   public abstract readonly kind: 'local' | 'ssh';
   protected readonly maxConcurrentSlots: number;
   protected readonly slotPortBase: number;
+  protected readonly portsPerSlot: number;
+  private readonly slotEnv?: (slotIndex: number, ports: readonly number[]) => Record<string, string>;
   protected readonly defaultTimeoutMs: number;
   protected readonly defaultInactivityTimeoutMs: number;
   private readonly queue: PQueue;
@@ -108,6 +120,8 @@ abstract class BaseSlotRunner implements Runner {
     this.id = id;
     this.maxConcurrentSlots = opts?.maxConcurrentSlots ?? 2;
     this.slotPortBase = opts?.slotPortBase ?? 18000;
+    this.portsPerSlot = opts?.portsPerSlot ?? 10;
+    this.slotEnv = opts?.slotEnv;
     this.defaultTimeoutMs = opts?.timeoutMs ?? 10 * 60_000;
     this.defaultInactivityTimeoutMs = opts?.inactivityTimeoutMs ?? 2 * 60_000;
     this.queue = new PQueue({ concurrency: this.maxConcurrentSlots });
@@ -117,12 +131,15 @@ abstract class BaseSlotRunner implements Runner {
     for (let i = 0; i < this.maxConcurrentSlots; i += 1) {
       if (!this.occupiedSlots.has(i)) {
         this.occupiedSlots.add(i);
-        const base = this.slotPortBase + i * 10;
-        const slotPorts = Array.from({ length: 10 }, (_, idx) => base + idx);
-        return { slotIndex: i, slotPorts };
+        return { slotIndex: i, slotPorts: this.portsForSlot(i) };
       }
     }
     throw new Error(`No free slot available on runner ${this.id}`);
+  }
+
+  protected portsForSlot(slotIndex: number): number[] {
+    const base = this.slotPortBase + slotIndex * this.portsPerSlot;
+    return Array.from({ length: this.portsPerSlot }, (_, idx) => base + idx);
   }
 
   protected releaseSlot(slotIndex: number): void {
@@ -137,10 +154,8 @@ abstract class BaseSlotRunner implements Runner {
     return {
       HARNESS_SLOT: String(slotIndex),
       PORT: String(slotPorts[0]),
-      PORT_API: String(slotPorts[0]),
-      PORT_WEB: String(slotPorts[1]),
-      PORT_ADMIN: String(slotPorts[2]),
-      ...(extraEnv ?? {}),
+      ...this.slotEnv?.(slotIndex, slotPorts),
+      ...extraEnv,
     };
   }
 
@@ -316,6 +331,7 @@ export class SshRunner extends BaseSlotRunner {
   public readonly maxCpuLoadRatio: number;
   public readonly minFreeDiskGb: number;
   private readonly sshBinary: string;
+  private readonly identityFile: string | undefined;
   private readonly skipPreFlightCheck: boolean;
   private readonly healthProbeFn?: (host: string, workDir: string) => Promise<SshHealthSnapshot>;
 
@@ -326,6 +342,7 @@ export class SshRunner extends BaseSlotRunner {
     this.maxCpuLoadRatio = opts.maxCpuLoadRatio ?? 1.5;
     this.minFreeDiskGb = opts.minFreeDiskGb ?? 5;
     this.sshBinary = opts.sshBinary ?? 'ssh';
+    this.identityFile = opts.identityFile;
     this.skipPreFlightCheck = opts.skipPreFlightCheck ?? false;
     this.healthProbeFn = opts.healthProbeFn;
   }
@@ -347,28 +364,29 @@ export class SshRunner extends BaseSlotRunner {
       'ServerAliveInterval=5',
       '-o',
       'ServerAliveCountMax=2',
+      ...(this.identityFile ? ['-i', this.identityFile] : []),
     ];
   }
 
+  /** The remote command runs in `cwd`, or in the host's work directory when the command names none. */
   public buildSshCommandArgs(
     command: string,
     slotIndex: number,
     extraEnv?: Record<string, string>,
+    cwd?: string,
   ): string[] {
-    const base = this.slotPortBase + slotIndex * 10;
-    const slotPorts = Array.from({ length: 10 }, (_, idx) => base + idx);
-    const envVars = this.buildSlotEnv(slotIndex, slotPorts, extraEnv);
-    const envPrefix = Object.entries(envVars)
-      .map(([k, v]) => `${k}=${v.replace(/'/g, "'\\''")}`)
-      .join(' ');
-
-    const escapedCmd = command.replace(/'/g, "'\\''");
-    const remoteWrapper = [
-      "setsid bash -c '",
+    const envVars = this.buildSlotEnv(slotIndex, this.portsForSlot(slotIndex), extraEnv);
+    const exports = Object.entries(envVars).map(([name, value]) => {
+      if (!ENV_NAME.test(name)) throw new Error(`Invalid environment variable name "${name}"`);
+      return `export ${name}=${shellQuote(value)};`;
+    });
+    const script = [
       'trap "kill -TERM -$$ 2>/dev/null; sleep 0.2; kill -KILL -$$ 2>/dev/null" EXIT INT TERM HUP;',
-      `cd ${this.workDir} && export ${envPrefix} && ${escapedCmd}`,
-      "'",
+      `cd ${shellQuote(cwd ?? this.workDir)} &&`,
+      ...exports,
+      command,
     ].join(' ');
+    const remoteWrapper = `setsid bash -c ${shellQuote(script)}`;
 
     return [...this.getMuxFlags(), this.host, remoteWrapper];
   }
@@ -426,30 +444,13 @@ export class SshRunner extends BaseSlotRunner {
     if (!this.skipPreFlightCheck) {
       await this.checkRemoteHealth();
     }
-    const sshArgs = this.buildSshCommandArgs(command, slotIndex, opts?.env);
+    const sshArgs = this.buildSshCommandArgs(command, slotIndex, opts?.env, opts?.cwd);
     return this.runSpawnedProcess(this.sshBinary, sshArgs, `ssh ${this.host}: ${command}`, {
-      cwd: opts?.cwd,
       env: {},
       timeoutMs: opts?.timeoutMs ?? this.defaultTimeoutMs,
       inactivityTimeoutMs: opts?.inactivityTimeoutMs ?? this.defaultInactivityTimeoutMs,
       reject: opts?.reject ?? true,
       signal: opts?.signal,
     });
-  }
-
-  public async syncGitRef(localWorkDir: string, sha: string, targetRef: string): Promise<void> {
-    const remoteUrl = `ssh://${this.host}${this.workDir}`;
-    await this.runSpawnedProcess(
-      'git',
-      ['-C', localWorkDir, 'push', '-f', remoteUrl, `${sha}:${targetRef}`],
-      `git push ${remoteUrl} ${sha}:${targetRef}`,
-      {
-        cwd: localWorkDir,
-        env: {},
-        timeoutMs: 120_000,
-        inactivityTimeoutMs: 60_000,
-        reject: true,
-      },
-    );
   }
 }

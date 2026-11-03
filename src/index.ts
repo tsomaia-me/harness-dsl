@@ -1,77 +1,14 @@
 export { z } from 'zod';
-export {
-  AgentDef,
-  BoundAgentSkill,
-  CommandDef,
-  ConditionalExecutable,
-  FlowDef,
-  H,
-  HeadDef,
-  ModelDef,
-  parseEnvFile,
-  SkillDef,
-} from './dsl.js';
-export {
-  AiSdkDriver,
-  type AiSdkDriverOptions,
-  ClaudeCliDriver,
-  type ClaudeCliDriverOptions,
-  CustomDriver,
-  type CustomDriverOptions,
-  drivers,
-  MockDriver,
-  type MockDriverOptions,
-} from './drivers/index.js';
-export {
-  FlowEngine,
-  type FlowRunOptions,
-  type FlowRunResult,
-  MaxIterationsReachedError,
-} from './engine.js';
-export {
-  HarnessMcpServer,
-  readTranscriptContextTokens,
-  startOrchestrator,
-} from './mcp.js';
-export {
-  AccountDef,
-  parseRateLimitHeaders,
-  PoolDef,
-  type PoolReserveConfig,
-  type PoolStrategy,
-  QuotaExhaustedError,
-} from './quota.js';
-export {
-  CommandTimeoutError,
-  InactivityTimeoutError,
-  killProcessGroupAndTree,
-  LocalRunner,
-  type LocalRunnerOptions,
-  RunnerDiskLowError,
-  RunnerLoadHighError,
-  SshRunner,
-  type SshRunnerOptions,
-} from './runner.js';
-export { HarnessStore, LessonSchema, type TicketRecord } from './store.js';
-export type {
-  AccountProvider,
-  AgentPlugin,
-  BatchAdapter,
-  BatchItemRequest,
-  BatchItemResult,
-  CommandExecOptions,
-  CommandExecResult,
-  Driver,
-  DriverInvokeRequest,
-  DriverInvokeResult,
-  Executable,
-  ExecutionContext,
-  FlowContext,
-  FlowMiddleware,
-  HeadCapability,
-  LessonEntry,
-  QuotaSnapshot,
-  ResolvedAccount,
-  Runner,
-  TokenUsage,
-} from './types.js';
+export * from './dsl/index.js';
+export { ControlError } from './engine/control.js';
+export { processResolver } from './engine/resolver.js';
+export { Runtime, StartupError, type RuntimeOptions } from './engine/runtime.js';
+import type { HarnessDef } from './dsl/harness.js';
+import { Runtime, type RuntimeOptions } from './engine/runtime.js';
+
+/** Validates the harness, starts its runtime and returns it; `runtime.run()` then ticks until `stop()`. */
+export async function start(harness: HarnessDef, options: Omit<RuntimeOptions, 'harness'>): Promise<Runtime> {
+  const runtime = new Runtime({ harness, ...options });
+  await runtime.start();
+  return runtime;
+}

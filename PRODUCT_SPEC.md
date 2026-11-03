@@ -7,7 +7,7 @@
 1. **Zero Domain Opinions in Core:** The framework core knows nothing about specific project roles ("Builder", "Auditor", "Visual Judge", "Arbiter"), project artifacts ("PRs", "Screens"), or programming languages. It provides the declarative primitives (`H.account`, `H.pool`, `H.model`, `H.runner`, `H.command`, `H.skill`, `H.agent`, `H.flow`, `H.head`) to compose any workflow. Project-specific patterns live in userland orchestrator packages or optional first-party plugins (`harness-dsl/plugins`).
 2. **Everything Is a Stateless, Typed Descriptor:** Every construct created with `H.*` is an immutable, stateless blueprint backed by Zod input and output schemas. Any `Executable<TInput, TOutput>` (`H.command`, `H.agent` bound to an `H.skill`, or sub-`H.flow`) can be wired into a pipeline step, a conditional branch, a loop, a batch job, an agent tool, or an MCP tool exposed to `Head`.
 3. **Deterministic State Machine Outside, Bounded LLMs Inside:** Workflow state, loops, retries, file leases, process lifecycles, and quota scheduling are executed deterministically by the Node.js runtime backed by SQLite. LLMs are invoked strictly as stateless or bounded-context functions that return Zod-validated outputs.
-4. **Provider & Transport Agnostic:** Workflows bind to `H.model`, never to a hardcoded vendor CLI or SDK. A model can run over a multi-account CLI subscription pool (`claude -p`), a real-time SDK (`@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/openai`), a cloud Batch API (50% discount), or a custom user function without changing a single line of flow logic.
+4. **Provider & Transport Agnostic:** Workflows bind to `H.model`, never to a hardcoded vendor CLI or SDK. A model can run over a multi-account CLI subscription pool (`claude -p`), a real-time SDK (`@ai-sdk/anthropic`, `@ai-sdk/google`, `@ai-sdk/openai`), a cloud Batch API (50% discount), or a custom user function without changing a single line of flow logic. Every provider-, CLI- and project-specific detail (rate-limit headers, quota windows, prices, hook formats, transcript formats, port names) sits behind an adapter with a first-party default, so the core never names a vendor.
 5. **Independent Per-Project Orchestrators:** Each project runs its own independent orchestrator process, SQLite database (`.harness/runtime.db`), and local MCP endpoint (`.mcp.json`). Projects share multi-account subscription pools safely via declarative quota caps (`.maxQuotaShare()`).
 
 ---
@@ -18,10 +18,12 @@
 
 Both `H.account` and `H.pool` implement the `AccountProvider` interface (Composite pattern). Anywhere an `AccountProvider` is accepted (such as `H.model`), either a single `H.account` or an `H.pool` may be passed.
 
-- **Reactive Quota & Reset Discovery:** Accounts do not require hardcoded weekly reset schedules. Drivers extract live utilization (`5h` and `7d` ratios) and exact `resetsAt` timestamps reactively from provider response headers, CLI quota probes, and `429` rate-limit payloads. If a provider grants an early or bonus reset, the next probe detects the drop in utilization and returns the account to active rotation immediately.
+- **Reactive Quota & Reset Discovery:** Accounts do not require hardcoded reset schedules. Each account tracks the quota windows its provider reports, by id (`anthropic:5h` and `anthropic:7d` for Claude subscriptions, `openai:requests` / `openai:tokens`, `anthropic:requests`, `http:ratelimit`, ...), each with a utilization ratio and an exact `resetsAt`. Drivers extract them reactively from response headers (through a `RateLimitAdapter`), the Claude CLI's stream-json rate-limit events, quota probes and `429` responses. If a provider grants an early or bonus reset, the next run's report or probe that shows the share window's utilization dropping (or its reset moving later) frees the project share and returns the account to rotation immediately. A window reported without a reset time stops blocking once it goes stale. An account that fails authentication (logged out, expired token, invalid key) is taken out of rotation for a while and shown as unavailable on the board, and the pool fails over.
+- **Reserve (`.reserve({ minFreeAccounts, maxBurstUtilization })`):** Keeps the `minFreeAccounts` least-used eligible accounts below `maxBurstUtilization` untouched. The pool uses its other eligible accounts first, then the fallback, and a reserved account only when neither is available.
+- **Quota Policy (`.quotaPolicy({...})`):** Per-window thresholds, the probe staleness, the token budget that turns token use into project share, the window whose reset frees the share, and the default cooldown come from a `QuotaPolicy`: core defaults, overridden by the driver (the Claude CLI driver supplies the subscription values) and then by `H.account(...).quotaPolicy({...})`.
 - **Per-Account and Per-Pool Quota Shares (`.maxQuotaShare(ratio)`):**
   - Declared on an individual `H.account`, `.maxQuotaShare(0.75)` caps this project's consumption of that specific account at 75% of its window.
-  - Declared on an `H.pool`, `.maxQuotaShare(0.60)` sets the default cap for accounts in the pool (individual account caps override or tighten the pool cap).
+  - Declared on an `H.pool`, `.maxQuotaShare(0.60)` sets the default cap for accounts in the pool (an individual account cap can only tighten the pool cap).
 
 ```typescript
 import { H, z } from 'harness-dsl';
@@ -53,7 +55,9 @@ export const Gemini = H.model(
 );
 ```
 
-Custom drivers are supported via `H.drivers.custom({ invoke, probeQuota?, batch? })`, allowing any CLI binary or HTTP API to back an `H.model`.
+Custom drivers are supported via `H.drivers.custom({ invoke, probeQuota?, batch? })`, allowing any CLI binary or HTTP API to back an `H.model`. `H.drivers.aiSdk({ provider })` also accepts a `ProviderPreset` (`{ name, createModel, apiKeyEnv?, mapModelOptions?, rateLimits?, pricing?, createBatch? }`), so any Vercel AI SDK model (Bedrock, Mistral, OpenRouter, Ollama) runs without core changes.
+
+Token costs come from a `PricingAdapter`: dated first-party price lists for Anthropic, OpenAI and Google, and the cost the Claude CLI itself reports. `H.model(...).pricing(adapter)` overrides it per model, on every path including batch, and takes precedence over a provider-reported cost. A model no price list knows is recorded as unpriced, never billed at a guessed rate.
 
 ### §1.3 Runners (`H.runner`)
 
@@ -79,6 +83,7 @@ export const Wb2Runner = H.runner.ssh('wb2', {
 });
 ```
 
+- **Slot Environment:** Each command gets `HARNESS_SLOT` and `PORT` (the slot's first port). Project-specific port names come from `slotEnv: (slot, ports) => ({ PORT_API: String(ports[0]), ... })`, and `portsPerSlot` sets the range size (default 10).
 - **Agentless SSH Execution:** `H.runner.ssh` requires no daemon installed on the remote host. It uses persistent SSH ControlMaster sockets, syncs git commits over LAN (`git push ssh://...`), and wraps remote commands in an isolated process group (`setsid` + `HUP` trap) so dropped connections or timeouts kill the entire remote process tree immediately.
 
 ### §1.4 Commands (`H.command`)
@@ -138,11 +143,13 @@ export const Builder = H.agent('builder')
   .promptFile('.harness/prompts/builder.md')
   .tools(['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob', 'LSP'])
   .tool('explore_repo', RepoExplorer.run(ExploreSkill)) // Composable agent-as-tool
-  .use(stopCommandHook(TouchedChecks))                  // Opt-in plugin hook
+  .use(stopCommandHook(TouchedChecks, {                  // Opt-in plugin hook
+    mapInput: ({ workDir }) => ({ worktreePath: workDir }),
+  }))
   .use(fileLeaseGuard());                               // Opt-in file scope lock
 ```
 
-- **Automatic Context Handoff:** If a multi-turn CLI agent approaches `maxContextTokens` (at `maxContextTokens - 30_000`), the driver injects a handoff turn instructing the agent to commit its progress and output a structured state summary, then transparently spawns a fresh successor session on the same worktree to finish the remaining criteria.
+- **Automatic Context Handoff:** If a multi-turn CLI agent approaches `maxContextTokens` (at `maxContextTokens - handoffBuffer`, where `.handoffBuffer(tokens)` defaults to `30_000`; more than `.maxHandoffs(n)` consecutive handoffs, default 3, fail the step), the driver injects a handoff turn instructing the agent to commit its progress and output a structured state summary, then transparently spawns a fresh successor session on the same worktree to finish the remaining criteria.
 
 ### §1.7 Flows & Combinators (`H.flow`)
 
@@ -151,6 +158,7 @@ export const Builder = H.agent('builder')
 | Combinator | Signature / Behavior |
 | :--- | :--- |
 | `.input(schema)` | Declares the Zod schema for `ctx.input`. |
+| `.identify({ ticketId?, touchedPaths? })` | Names which input values are the run's ticket id (shown on the board) and touched file paths (used to filter lessons). The engine reads no input field unless the flow names it here. |
 | `.step(name, exec, mapInput?)` | Runs `exec`, validates output via Zod, and assigns it to `ctx.steps[name]`. |
 | `.when(predicate, execOrSubflow)` | Executes the step/subflow only if `predicate(ctx)` is truthy; types `ctx.steps[name]` as `TOutput \| undefined`. |
 | `.branch(selector, map)` | Routes execution to `map[selector(ctx)]`. |
@@ -196,6 +204,7 @@ export const Head = H.head()
   - `.claude/skills/head/SKILL.md` instructs `Head` to call `harness_ground()` as its first step.
   - `harness_ground()` registers `Head`'s session, returns live queue/blocker/account state, any note from the prior `Head`, and `head`-scoped lessons.
   - A `PostToolUse` hook on `mcp__harness__*` reads `Head`'s `transcript_path` token usage on every MCP tool call. When usage crosses `contextNoticeThreshold`, the MCP response instructs `Head` to call `harness_handoff({ note })` and compact or rotate.
+  - Hook callbacks from agents and `Head` go through a `HookProtocol` that builds the agent's hook settings, parses callbacks into neutral tool events, formats the answers and measures transcripts. Each driver brings its agents' protocol (`claude-code` for the Claude CLI), and each invocation registers its plugins with the orchestrator, so batch items and parallel agents keep their own guards. An agent with plugins refuses to run where hooks cannot be delivered. `.headProtocol(protocol)` sets the protocol the Head's own client speaks (default `claude-code`); the Head's MCP config (`.mcp.json`) and its `PostToolUse` hook currently assume Claude Code.
 
 ---
 
@@ -228,11 +237,11 @@ When launching an agent, the orchestrator filters `lessons.jsonl` in memory by m
 All mutable runtime state lives in `.harness/runtime.db` (SQLite, gitignored). On every state transition, the orchestrator synchronously projects two human-readable Markdown files:
 
 1. **`.harness/BOARD.md`:**
-   - Live account pool status (utilization %, `resetsAt` countdown, active project quota share).
+   - Live account pool status: one column per quota window id with utilization % and `resetsAt` countdown, plus the project quota share.
    - Active, queued, blocked, and recently completed workflow runs with current round, active step, and context usage.
    - Open blockers with options and recommendations.
 2. **`.harness/TELEMETRY.md`:**
-   - Per-run breakdown: start/end timestamps, wall-clock duration, iterations taken, input/cached/output tokens, **actual API \$ spent**, and **subscription API-equivalent \$ value**.
+   - Per-run breakdown: start/end timestamps, wall-clock duration, iterations taken, input/cached/output tokens, **actual API \$ spent**, and **subscription API-equivalent \$ value**. Invocations of an unpriced model show `—`, and totals that include them say `+ unpriced`.
    - Per-agent scorecard: first-round pass rate, catch rate, average duration, and token efficiency.
 
 ---
@@ -308,6 +317,7 @@ const Auditor = H.agent('auditor')
 
 export const ticketWorkflow = H.flow('ticket-flow')
   .input(TicketInput)
+  .identify({ ticketId: (ticket) => ticket.id, touchedPaths: (ticket) => ticket.touches })
   .use(gitWorktreeIsolation({ baseBranch: 'origin/main' }))
   .loop({
     maxIterations: 3,

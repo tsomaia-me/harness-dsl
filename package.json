@@ -1,10 +1,12 @@
 {
   "name": "harness-dsl",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "private": false,
   "type": "module",
   "files": [
-    "dist"
+    "dist",
+    "drizzle-ledger",
+    "drizzle-quota"
   ],
   "publishConfig": {
     "access": "public"
@@ -14,9 +16,61 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./plugins": {
-      "types": "./dist/plugins/index.d.ts",
-      "default": "./dist/plugins/index.js"
+    "./kernel": {
+      "types": "./dist/kernel/index.d.ts",
+      "default": "./dist/kernel/index.js"
+    },
+    "./claude-code": {
+      "types": "./dist/adapters/claude-code/index.d.ts",
+      "default": "./dist/adapters/claude-code/index.js"
+    },
+    "./anthropic": {
+      "types": "./dist/adapters/anthropic/index.d.ts",
+      "default": "./dist/adapters/anthropic/index.js"
+    },
+    "./sqlite": {
+      "types": "./dist/adapters/sqlite/index.d.ts",
+      "default": "./dist/adapters/sqlite/index.js"
+    },
+    "./http": {
+      "types": "./dist/adapters/http/index.d.ts",
+      "default": "./dist/adapters/http/index.js"
+    },
+    "./markdown": {
+      "types": "./dist/adapters/markdown/index.d.ts",
+      "default": "./dist/adapters/markdown/index.js"
+    },
+    "./slack": {
+      "types": "./dist/adapters/slack/index.d.ts",
+      "default": "./dist/adapters/slack/index.js"
+    },
+    "./local": {
+      "types": "./dist/adapters/local/index.d.ts",
+      "default": "./dist/adapters/local/index.js"
+    },
+    "./ssh": {
+      "types": "./dist/adapters/ssh/index.d.ts",
+      "default": "./dist/adapters/ssh/index.js"
+    },
+    "./git": {
+      "types": "./dist/adapters/git/index.d.ts",
+      "default": "./dist/adapters/git/index.js"
+    },
+    "./jsonl": {
+      "types": "./dist/adapters/jsonl/index.d.ts",
+      "default": "./dist/adapters/jsonl/index.js"
+    },
+    "./google": {
+      "types": "./dist/adapters/google/index.d.ts",
+      "default": "./dist/adapters/google/index.js"
+    },
+    "./openrouter": {
+      "types": "./dist/adapters/openrouter/index.d.ts",
+      "default": "./dist/adapters/openrouter/index.js"
+    },
+    "./gemini-cli": {
+      "types": "./dist/adapters/gemini-cli/index.d.ts",
+      "default": "./dist/adapters/gemini-cli/index.js"
     }
   },
   "scripts": {
@@ -24,17 +78,14 @@
     "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
     "test": "vitest run test/unit",
     "test:e2e": "vitest run test/e2e",
+    "db:generate": "drizzle-kit generate --config drizzle.ledger.config.ts && drizzle-kit generate --config drizzle.quota.config.ts",
     "prepublishOnly": "tsc -p tsconfig.typecheck.json --noEmit && tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.0",
-    "@ai-sdk/google": "^3.0.0",
-    "@ai-sdk/openai": "^3.0.0",
     "@modelcontextprotocol/sdk": "^1.25.0",
     "ai": "^6.0.0",
     "better-sqlite3": "^12.0.0",
     "drizzle-orm": "^0.45.0",
-    "gray-matter": "^4.0.3",
     "p-queue": "^9.0.0",
     "picomatch": "^4.0.3",
     "simple-git": "^3.30.0",
@@ -42,10 +93,33 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@ai-sdk/anthropic": "^3.0.0",
+    "@ai-sdk/google": "^3.0.0",
+    "@ai-sdk/openai": "^3.0.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.19.0",
     "@types/picomatch": "^4.0.0",
+    "drizzle-kit": "0.31.11",
     "typescript": "^5.9.0",
     "vitest": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@ai-sdk/anthropic": "^3.0.0",
+    "@ai-sdk/google": "^3.0.0",
+    "@ai-sdk/openai": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@ai-sdk/anthropic": {
+      "optional": true
+    },
+    "@ai-sdk/google": {
+      "optional": true
+    },
+    "@ai-sdk/openai": {
+      "optional": true
+    }
+  },
+  "bin": {
+    "harness": "./dist/cli.js"
   }
 }

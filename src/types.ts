@@ -1,74 +1,67 @@
-import type { z } from 'zod';
-import type { HarnessStore } from './store.js';
-
-export type HeadCapability =
-  | 'workflows:read'
-  | 'workflows:control'
-  | 'tickets:read'
-  | 'tickets:write'
-  | 'blockers:resolve'
-  | 'lessons:manage'
-  | 'accounts:manage'
-  | 'telemetry:read'
-  | 'runner:exec';
-
-export interface QuotaSnapshot {
-  readonly utilization5h: number;
-  readonly utilization7d: number;
-  readonly resets5hAtMs: number | null;
-  readonly resets7dAtMs: number | null;
-  readonly cooldownUntilMs: number | null;
+export interface QuotaWindow {
+  readonly id: string;
+  readonly utilization: number;
+  readonly resetsAtMs: number | null;
 }
 
-export interface TokenUsage {
+export interface QuotaWindowPatch {
+  readonly id: string;
+  readonly utilization?: number;
+  readonly resetsAtMs?: number | null;
+}
+
+export interface QuotaPatch {
+  readonly windows?: readonly QuotaWindowPatch[];
+  readonly cooldownUntilMs?: number | null;
+}
+
+export interface RateLimitResponse {
+  readonly status: number;
+  readonly headers: Readonly<Record<string, string | undefined>>;
+  readonly body?: unknown;
+}
+
+export interface RateLimitAdapter {
+  fromResponse(response: RateLimitResponse, nowMs: number): QuotaPatch;
+}
+
+export interface TokenCounts {
   readonly inputTokens: number;
   readonly cachedInputTokens: number;
+  readonly cacheWriteTokens?: number;
   readonly outputTokens: number;
-  readonly actualCostUsd: number;
-  readonly equivalentCostUsd: number;
 }
 
-export interface ExecutionContext {
-  readonly runId: string;
-  readonly iteration: number;
-  readonly stepName: string;
-  readonly projectDir: string;
-  readonly workDir: string;
-  readonly slotIndex: number;
-  readonly slotPorts: readonly number[];
-  readonly touchedPaths: readonly string[];
-  readonly store: HarnessStore;
-  readonly hookServerUrl?: string;
-  readonly signal: AbortSignal;
+export interface TokenUsage extends TokenCounts {
+  readonly actualCostUsd: number | null;
+  readonly equivalentCostUsd: number | null;
 }
 
-export interface Executable<TInput = any, TOutput = any> {
-  readonly kind: 'command' | 'agent-skill' | 'flow' | 'batch';
-  readonly name: string;
-  readonly inputSchema: z.ZodType<TInput>;
-  readonly outputSchema: z.ZodType<TOutput>;
-  execute(input: TInput, ctx: ExecutionContext): Promise<TOutput>;
+export interface PricingAdapter {
+  estimate(modelId: string, usage: TokenCounts, atMs: number): number | null;
 }
 
 export interface DriverInvokeRequest {
   readonly accountId: string;
   readonly modelId: string;
   readonly modelOptions: Record<string, unknown>;
+  readonly pricing?: PricingAdapter;
   readonly systemPrompt: string;
   readonly userPrompt: string;
   readonly outputJsonSchema: Record<string, unknown>;
   readonly workDir: string;
   readonly allowedTools?: readonly string[];
-  readonly customTools?: ReadonlyMap<string, Executable<any, any>>;
-  readonly maxContextTokens?: number;
   readonly hookServerUrl?: string;
-  readonly hookTypes?: readonly ('PreToolUse' | 'PostToolUse' | 'Stop')[];
+  readonly invocationId?: string;
+  readonly hookSubscriptions?: HookSubscriptions;
   readonly runId: string;
   readonly stepName: string;
   readonly sessionId?: string;
   readonly resumeSession?: boolean;
   readonly inactivityTimeoutMs: number;
   readonly signal: AbortSignal;
+  /** Told the agent's pid once it is spawned, so a crashed harness can report the session as running. */
+  readonly onSpawn?: (pid: number) => void;
 }
 
 export interface DriverInvokeResult {
@@ -76,11 +69,7 @@ export interface DriverInvokeResult {
   readonly rawText: string;
   readonly sessionId: string;
   readonly usage: TokenUsage;
-  readonly handoffRequested?: {
-    readonly summary: string;
-    readonly remainingWork: readonly string[];
-  };
-  readonly quotaHint?: Partial<QuotaSnapshot>;
+  readonly quotaHint?: QuotaPatch;
 }
 
 export interface BatchItemRequest {
@@ -103,6 +92,7 @@ export interface BatchAdapter {
     items: readonly BatchItemRequest[],
     modelId: string,
     opts: Record<string, unknown>,
+    pricing?: PricingAdapter,
   ): Promise<{ batchId: string }>;
   poll(batchId: string): Promise<{
     status: 'running' | 'completed' | 'failed';
@@ -112,23 +102,10 @@ export interface BatchAdapter {
 }
 
 export interface Driver {
-  readonly kind: 'claude-cli' | 'ai-sdk' | 'custom' | 'mock';
+  readonly kind: string;
   invoke(req: DriverInvokeRequest): Promise<DriverInvokeResult>;
-  probeQuota?(accountId: string): Promise<Partial<QuotaSnapshot>>;
+  readonly hookProtocol?: HookProtocol;
   readonly batch?: BatchAdapter;
-}
-
-export interface ResolvedAccount {
-  readonly accountId: string;
-  readonly driver: Driver;
-  readonly maxQuotaShare: number;
-}
-
-export interface AccountProvider {
-  readonly id: string;
-  readonly maxQuotaShareValue: number;
-  maxQuotaShare(ratio: number): this;
-  acquireAccount(store: HarnessStore): Promise<ResolvedAccount>;
 }
 
 export interface CommandExecResult {
@@ -155,49 +132,34 @@ export interface Runner {
     command: string,
     opts?: CommandExecOptions,
   ): Promise<CommandExecResult & { slotIndex: number; slotPorts: readonly number[] }>;
-  syncGitRef?(localWorkDir: string, sha: string, targetRef: string): Promise<void>;
 }
 
-export interface AgentPlugin {
+export type ToolEventPhase = 'pre-tool' | 'post-tool' | 'stop';
+
+export type ToolIntent = 'file-write';
+
+export interface ToolEvent {
+  readonly phase: ToolEventPhase;
+  readonly intent: ToolIntent | null;
+  readonly toolName?: string;
+  readonly filePaths: readonly string[];
+  readonly sessionId?: string;
+  readonly raw: Readonly<Record<string, unknown>>;
+}
+
+export interface HookDecision {
+  readonly allow: boolean;
+  readonly reason?: string;
+}
+
+export interface HookSubscriptions {
+  readonly preToolIntents: readonly ToolIntent[];
+  readonly stop: boolean;
+}
+
+export interface HookProtocol {
   readonly name: string;
-  readonly hookTypes?: readonly ('PreToolUse' | 'PostToolUse' | 'Stop')[];
-  onPreToolUse?(
-    payload: Record<string, unknown>,
-    ctx: { runId: string; store: HarnessStore; workDir: string },
-  ): Promise<{ allow: boolean; reason?: string }>;
-  onStop?(
-    payload: Record<string, unknown>,
-    ctx: { runId: string; store: HarnessStore; workDir: string },
-  ): Promise<{ allow: boolean; reason?: string }>;
-}
-
-export interface FlowMiddleware {
-  readonly name: string;
-  wrap<TInput, TOutput>(
-    input: TInput,
-    ctx: ExecutionContext,
-    next: (updatedCtx: ExecutionContext) => Promise<TOutput>,
-  ): Promise<TOutput>;
-}
-
-export interface LessonEntry {
-  readonly id: string;
-  readonly kind: 'domain' | 'behavioral';
-  readonly roles: readonly string[];
-  readonly paths: readonly string[];
-  readonly rule: string;
-  readonly createdAt: string;
-}
-
-export interface FlowContext<
-  TInput = unknown,
-  TSteps extends Record<string, any> = Record<string, unknown>,
-> {
-  readonly runId: string;
-  readonly iteration: number;
-  readonly input: TInput;
-  readonly steps: TSteps;
-  readonly prev?: TSteps;
-  readonly resolutions: readonly unknown[];
-  readonly workDir: string;
+  buildSettings(endpoint: string, subscriptions: HookSubscriptions): Record<string, unknown>;
+  parse(payload: Record<string, unknown>): ToolEvent | null;
+  formatDecision(event: ToolEvent, decision: HookDecision): Record<string, unknown>;
 }
