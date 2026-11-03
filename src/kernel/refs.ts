@@ -12,6 +12,8 @@ export interface Entity<E extends string> extends Named {
 export interface EnvRef {
   readonly ref: 'env';
   readonly name: string;
+  /** Which of the variable's comma-separated values, counted from 0; absent, the whole value. */
+  readonly index?: number;
 }
 
 export interface PortRef {

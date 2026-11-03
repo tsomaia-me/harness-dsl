@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ModelRequest, ModelResponse, StoredScope } from '../kernel/backends.js';
 import { AccountRefusedError, type ObservedWindow } from '../kernel/quota.js';
-import type { Json, JsonObject } from '../kernel/refs.js';
+import type { EnvRef, Json, JsonObject } from '../kernel/refs.js';
 import { AccountUnavailableError, RateLimitedError } from '../drivers/errors.js';
 import { ANTHROPIC_5H_WINDOW, ANTHROPIC_7D_WINDOW } from '../rate-limits/anthropic.js';
 import type { QuotaPatch, TokenUsage } from '../types.js';
@@ -105,6 +105,19 @@ export function refusalOf(err: unknown, account: string, nowMs: number, cooldown
   }
   if (err instanceof AccountUnavailableError) return new AccountRefusedError(account, 'unavailable', new Date(nowMs + cooldowns.unavailableCooldownMs), err.reason.slice(0, REFUSAL_DETAIL_LIMIT));
   return undefined;
+}
+
+/** One string per credential: the variable's name, and the value's index when the variable holds several. */
+export function credentialKey(ref: EnvRef | undefined): string {
+  if (!ref) return '';
+  return ref.index === undefined ? ref.name : `${ref.name}#${ref.index}`;
+}
+
+/** The credential a `credentialKey` names, for a job id that outlived the harness. */
+export function credentialRef(key: string): EnvRef {
+  const at = key.lastIndexOf('#');
+  const index = at === -1 ? Number.NaN : Number(key.slice(at + 1));
+  return Number.isInteger(index) && index >= 0 ? { ref: 'env', name: key.slice(0, at), index } : { ref: 'env', name: key };
 }
 
 /** A stable UUID for a step's idempotency key, so a rerun of the same step resumes its session. */

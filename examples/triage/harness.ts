@@ -43,9 +43,13 @@ export function triageHarness(options: TriageHarnessOptions) {
   const provider = options.provider ?? 'anthropic';
   const quota = sqlite.quota(provider, { path: path.join(options.stateDir, 'quota.sqlite') });
   const modelId = options.model ?? DEFAULT_MODEL[provider];
-  const api = provider === 'google' ? google.account('api', { apiKey: H.env('GEMINI_API_KEY'), quota }) : anthropic.account('api', { apiKey: H.env('ANTHROPIC_API_KEY'), quota });
+  // ANTHROPIC_API_KEY holds three comma-separated keys; each is an account of the pool, and a refused one yields to the next.
+  const accounts =
+    provider === 'google'
+      ? [google.account('api', { apiKey: H.env('GEMINI_API_KEY'), quota })]
+      : [0, 1, 2].map((index) => anthropic.account(`api-${index + 1}`, { apiKey: H.env('ANTHROPIC_API_KEY', { index }), quota }));
   const model = provider === 'google' ? google.model('classifier-model', { id: modelId }) : anthropic.model('classifier-model', { id: modelId });
-  const classifier = H.seat('classifier').role(classifierRole).model(model).pool(H.pool('api').accounts(api));
+  const classifier = H.seat('classifier').role(classifierRole).model(model).pool(H.pool('api').accounts(...accounts));
 
   const Urgency = H.facet('urgency', ['low', 'high']);
   const autoSend = H.policy.halt('auto-send', Conversation, send).decide((ctx) => (ctx.facets.some((facet) => facet.facet.name === 'urgency' && facet.value === 'low') ? { send: true } : undefined));

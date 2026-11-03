@@ -3,7 +3,7 @@ import type { ModelDriver, ModelRequest, ModelResponse } from '../kernel/backend
 import type { Account } from '../kernel/quota.js';
 import type { EnvRef, Resolver } from '../kernel/refs.js';
 import type { BatchItemResult } from '../types.js';
-import { DEFAULT_INACTIVITY_TIMEOUT_MS, DEFAULT_RATE_LIMIT_COOLDOWN_MS, DEFAULT_UNAVAILABLE_COOLDOWN_MS, envelopeSchema, equivalentOf, refusalOf, systemPrompt, tokensOf, unpack, userPrompt, windowsOf } from './model-calls.js';
+import { credentialKey, credentialRef, DEFAULT_INACTIVITY_TIMEOUT_MS, DEFAULT_RATE_LIMIT_COOLDOWN_MS, DEFAULT_UNAVAILABLE_COOLDOWN_MS, envelopeSchema, equivalentOf, refusalOf, systemPrompt, tokensOf, unpack, userPrompt, windowsOf } from './model-calls.js';
 
 export { DEFAULT_INACTIVITY_TIMEOUT_MS };
 
@@ -19,7 +19,7 @@ function indexOf(customId: string): number {
   return Number(customId.slice(0, customId.indexOf(':')));
 }
 
-/** A job id is `<credential env name>:<request count>:<batch id>`, so a restarted harness collects it and checks it whole. */
+/** A job id is `<credential key>:<request count>:<batch id>`, so a restarted harness collects it and checks it whole. */
 function parseJobId(jobId: string): { readonly credential: string; readonly count: number; readonly batchId: string } {
   const [credential, count, ...rest] = jobId.split(':');
   const batchId = rest.join(':');
@@ -51,10 +51,11 @@ export class AiSdkModelDriver<D extends string> implements ModelDriver<D> {
 
   private inner(credential: EnvRef | undefined, resolver: Resolver): AiSdkDriver {
     if (!credential) throw new Error(`the ${this.driver} driver needs an account with a credential`);
-    let inner = this.inners.get(credential.name);
+    const key = credentialKey(credential);
+    let inner = this.inners.get(key);
     if (!inner) {
       inner = new AiSdkDriver({ provider: this.preset, apiKey: resolver.env(credential), ...(this.options.fetch ? { fetch: this.options.fetch } : {}), ...(this.options.baseURL ? { baseURL: this.options.baseURL } : {}) });
-      this.inners.set(credential.name, inner);
+      this.inners.set(key, inner);
     }
     return inner;
   }
@@ -100,7 +101,7 @@ export class AiSdkModelDriver<D extends string> implements ModelDriver<D> {
         first.model,
         {},
       );
-      return { jobId: `${first.account.credential!.name}:${requests.length}:${batchId}` };
+      return { jobId: `${credentialKey(first.account.credential)}:${requests.length}:${batchId}` };
     } catch (err) {
       throw refusalOf(err, first.account.name, Date.now(), this.cooldowns()) ?? err;
     }
@@ -108,7 +109,7 @@ export class AiSdkModelDriver<D extends string> implements ModelDriver<D> {
 
   public async collectBatch(jobId: string, resolver: Resolver): Promise<readonly ModelResponse[] | undefined> {
     const { credential, count, batchId } = parseJobId(jobId);
-    const batch = this.inner({ ref: 'env', name: credential }, resolver).batch;
+    const batch = this.inner(credentialRef(credential), resolver).batch;
     if (!batch) throw new Error(`the ${this.driver} driver has no batch adapter`);
     const polled = await batch.poll(batchId);
     if (polled.status === 'running') return undefined;

@@ -19,8 +19,9 @@ import { when } from './sources.js';
 import { trigger } from './triggers.js';
 
 export const H = {
-  env(name: string): EnvRef {
-    return { ref: 'env', name };
+  /** An environment variable, or with `index` one of the comma-separated values it holds. */
+  env(name: string, options: { readonly index?: number } = {}): EnvRef {
+    return { ref: 'env', name, ...(options.index !== undefined ? { index: options.index } : {}) };
   },
   slot: {
     port(slot: number): PortRef {

@@ -14,6 +14,7 @@ A new kernel. A flow is a declared tree of named steps, never an async function;
 - **One agent-CLI driver** under the Claude CLI and the Gemini CLI: a spawn in its own process group, a watchdog on silence, stream parsing per CLI, hook settings placed per run, the agent's pid kept while it runs, and refusals mapped to account cooldowns.
 - **`harness` CLI**: `start`, `status`, `install --launchd | --systemd`.
 - `start(harness, options)` and `processResolver()` at the package root.
+- `claudeCode.subscription(name, { configDir })`: a subscription signed in at a Claude Code configuration directory (`CLAUDE_CONFIG_DIR`), one driver per sign-in; and `H.env(name, { index })`, the k-th of a variable's comma-separated values, so one variable holding several keys gives a pool of accounts.
 
 ### Changed
 
@@ -28,14 +29,13 @@ A new kernel. A flow is a declared tree of named steps, never an async function;
 ### Verified live (2026-11-02)
 
 - The coding loop on the signed-in Claude Code CLI: a guarded builder in a git worktree (area lease taken through the `PreToolUse` hook), the checks as a command, approval over the HTTP control API, the fix landed, board and telemetry written.
-- Support triage on the Gemini API: classification, a halt skipped by policy, a human decision over HTTP, the decisions folded into a metric.
+- Support triage on the Anthropic API (a pool of three keys from one variable) and on the Gemini API: classification, a halt skipped by policy, a human decision over HTTP, the decisions folded into a metric.
 - OpenRouter batches: submission, polling and collection, each item charged its share of the batch's reported cost. Right after creation the batch answers 404 for a moment, which the adapter reads as running; a poll that cannot reach the provider leaves the batch running.
 - A guarded step on the Gemini CLI: the hooks placed in the workspace's `.gemini/settings.json` (`tools.enableHooks`, `hooks.enabled`, `BeforeTool` on `write_file|replace`) reached the hook server live, the area lease was taken on the write, the checks passed, the fix landed.
 
 ### Not verified live
 
 - The Gemini batch endpoint answered `FAILED_PRECONDITION` to every request from the available key, a minimal one included; the adapter is verified against the documented shapes only.
-- Triage on the Anthropic API: the available key had no credit; the call path is the same AI SDK driver the Gemini run used.
 
 ## 0.3.0
 

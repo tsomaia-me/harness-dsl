@@ -46,9 +46,9 @@ export class GeminiCliModelDriver extends CliModelDriver<'gemini-cli'> {
     this.geminiBinary = options.geminiBinary;
   }
 
-  protected createInner(credential: EnvRef | undefined, resolver: Resolver): CliAgentDriver {
+  protected createInner(account: Account, resolver: Resolver): CliAgentDriver {
     return new GeminiCliDriver({
-      ...(credential ? { apiKey: resolver.env(credential) } : {}),
+      ...(account.credential ? { apiKey: resolver.env(account.credential) } : {}),
       ...(this.geminiBinary ? { geminiBinary: this.geminiBinary } : {}),
       ...(this.options.env ? { env: this.options.env } : {}),
       ...(this.options.spawnBridge ? { spawnBridge: this.options.spawnBridge } : {}),

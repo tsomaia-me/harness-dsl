@@ -4,12 +4,13 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { anthropic } from '../../src/adapters/anthropic/index.js';
 import { claudeCode } from '../../src/adapters/claude-code/index.js';
+import { credentialKey, credentialRef } from '../../src/adapters/model-calls.js';
 import { H } from '../../src/dsl/index.js';
 import { AccountRefusedError } from '../../src/kernel/index.js';
 import type { MemoryItem, ModelRequest, Resolver } from '../../src/kernel/index.js';
 import { fakeQuota } from './scenarios/doubles.js';
 
-const resolver: Resolver = { env: (ref) => `secret-${ref.name}`, port: () => 0 };
+const resolver: Resolver = { env: (ref) => `secret-${ref.name}${ref.index === undefined ? '' : `#${ref.index}`}`, port: () => 0 };
 const quota = fakeQuota('q');
 const lesson: MemoryItem = {
   id: 'mem-1',
@@ -117,6 +118,19 @@ describe('the claude-code adapter', () => {
     expect(await fresh.session('u9/review', resolver)).toEqual({ status: 'lost' });
   });
 
+  it('signs a subscription in at its configuration directory, one driver per sign-in, never through an inherited API key', async () => {
+    const { calls, spawnBridge } = bridge([{ type: 'result', structured_output: { result: { verdict: 'ship' } } }]);
+    const driver = claudeCode.driver({ spawnBridge, workDir: dir, sessionDir: path.join(dir, 'sessions') });
+    const byDir = claudeCode.subscription('max-b', { configDir: H.env('CLAUDE_CONFIG_DIR_2'), quota });
+    const byDefault = claudeCode.subscription('max-c', { quota });
+    await driver.invoke(request(byDir, sonnet.id), resolver);
+    await driver.invoke(request(account, sonnet.id, { idempotencyKey: 'u2/review' }), resolver);
+    await driver.invoke(request(byDefault, sonnet.id, { idempotencyKey: 'u3/review' }), resolver);
+    expect.soft(calls.map((call) => call.env.CLAUDE_CONFIG_DIR)).toEqual(['secret-CLAUDE_CONFIG_DIR_2', undefined, undefined]);
+    expect.soft(calls.map((call) => call.env.CLAUDE_CODE_OAUTH_TOKEN)).toEqual([undefined, 'secret-MAX_A_TOKEN', undefined]);
+    expect(driver['inners'].size).toBe(3);
+  });
+
   it('returns a raised halt and resumes the session with the decision', async () => {
     const { calls, spawnBridge } = bridge([{ type: 'result', structured_output: { halt: { name: 'approval', ask: 'ship it?' } } }]);
     const driver = claudeCode.driver({ spawnBridge, workDir: dir, sessionDir: path.join(dir, 'sessions') });
@@ -209,6 +223,20 @@ describe('the anthropic adapter', () => {
     const error = await driver.invoke(request(account, opus.id), resolver).catch((err: unknown) => err);
     expect.soft(error).toBeInstanceOf(AccountRefusedError);
     expect((error as AccountRefusedError).refusal).toBe('unavailable');
+  });
+
+  it('two accounts on one variable\'s values use their own keys, and a batch job id keeps the value\'s index', async () => {
+    const { calls, fetchFn } = messagesFetch(JSON.stringify({ result: { verdict: 'ship' } }));
+    const driver = anthropic.driver({ fetch: fetchFn });
+    const first = anthropic.account('api-1', { apiKey: H.env('ANTHROPIC_KEY', { index: 0 }), quota });
+    const second = anthropic.account('api-2', { apiKey: H.env('ANTHROPIC_KEY', { index: 1 }), quota });
+    await driver.invoke(request(first, opus.id), resolver);
+    await driver.invoke(request(second, opus.id), resolver);
+    expect.soft(calls.map((call) => call.headers['x-api-key'])).toEqual(['secret-ANTHROPIC_KEY#0', 'secret-ANTHROPIC_KEY#1']);
+    expect.soft(credentialKey(H.env('ANTHROPIC_KEY', { index: 2 }))).toBe('ANTHROPIC_KEY#2');
+    expect.soft(credentialRef('ANTHROPIC_KEY#2')).toEqual({ ref: 'env', name: 'ANTHROPIC_KEY', index: 2 });
+    expect.soft(credentialRef('ANTHROPIC_KEY')).toEqual({ ref: 'env', name: 'ANTHROPIC_KEY' });
+    expect(credentialKey(undefined)).toBe('');
   });
 
   it('submits a batch with indexed custom ids and collects the results in request order', async () => {

@@ -36,9 +36,12 @@ const Fix = H.kind('Fix')
 
 // Accounts draw on a quota partition shared by every harness that names it.
 const quota = sqlite.quota('claude', { path: '.harness/quota.sqlite' });
+// A subscription signs in through an OAuth token, at a Claude Code configuration directory, or through the CLI's default sign-in.
 const max = claudeCode.subscription('max', { token: H.env('CLAUDE_MAX_TOKEN'), quota });
+const second = claudeCode.subscription('second', { configDir: H.env('CLAUDE_CONFIG_DIR_2'), quota });
+// H.env('ANTHROPIC_API_KEY', { index: 1 }) names the second of a variable's comma-separated values.
 const sonnet = claudeCode.model('sonnet', { id: 'claude-sonnet-5-5' });
-const subs = H.pool('subs').accounts(max);
+const subs = H.pool('subs').accounts(max, second);
 
 // A role is a typed contract; a seat is role × model × pool.
 const builderRole = H.role('builder')

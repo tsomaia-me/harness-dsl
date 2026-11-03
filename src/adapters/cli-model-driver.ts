@@ -1,8 +1,8 @@
 import type { CliAgentDriver, CliSpawnBridge } from '../drivers/cli-agent.js';
 import type { GuardProtocol, ModelDriver, ModelRequest, ModelResponse, SessionStatus } from '../kernel/backends.js';
 import type { Account } from '../kernel/quota.js';
-import type { EnvRef, Resolver } from '../kernel/refs.js';
-import { DEFAULT_INACTIVITY_TIMEOUT_MS, DEFAULT_RATE_LIMIT_COOLDOWN_MS, DEFAULT_UNAVAILABLE_COOLDOWN_MS, envelopeSchema, equivalentOf, refusalOf, sessionIdFor, systemPrompt, tokensOf, unpack, userPrompt, windowsOf } from './model-calls.js';
+import type { Resolver } from '../kernel/refs.js';
+import { credentialKey, DEFAULT_INACTIVITY_TIMEOUT_MS, DEFAULT_RATE_LIMIT_COOLDOWN_MS, DEFAULT_UNAVAILABLE_COOLDOWN_MS, envelopeSchema, equivalentOf, refusalOf, sessionIdFor, systemPrompt, tokensOf, unpack, userPrompt, windowsOf } from './model-calls.js';
 import { FinishedSessions } from './sessions.js';
 
 export interface CliModelDriverOptions {
@@ -38,8 +38,13 @@ export abstract class CliModelDriver<D extends string> implements ModelDriver<D>
     this.sessions = new FinishedSessions(options.sessionDir ?? defaultSessionDir);
   }
 
-  /** The agent driver for one credential; `undefined` is the CLI's own sign-in. */
-  protected abstract createInner(credential: EnvRef | undefined, resolver: Resolver): CliAgentDriver;
+  /** The agent driver for one account's sign-in. */
+  protected abstract createInner(account: Account, resolver: Resolver): CliAgentDriver;
+
+  /** What tells one inner driver from another: the credential, and whatever else the sign-in depends on. */
+  protected innerKey(account: Account): string {
+    return credentialKey(account.credential);
+  }
 
   protected modelOptions(_request: ModelRequest): Record<string, unknown> {
     return {};
@@ -53,11 +58,11 @@ export abstract class CliModelDriver<D extends string> implements ModelDriver<D>
     return account.driver === this.driver;
   }
 
-  private inner(credential: EnvRef | undefined, resolver: Resolver): CliAgentDriver {
-    const key = credential?.name ?? '';
+  private inner(account: Account, resolver: Resolver): CliAgentDriver {
+    const key = this.innerKey(account);
     let inner = this.inners.get(key);
     if (!inner) {
-      inner = this.createInner(credential, resolver);
+      inner = this.createInner(account, resolver);
       this.inners.set(key, inner);
     }
     return inner;
@@ -72,7 +77,7 @@ export abstract class CliModelDriver<D extends string> implements ModelDriver<D>
     };
     let result;
     try {
-      result = await this.inner(request.account.credential, resolver).invoke({
+      result = await this.inner(request.account, resolver).invoke({
         accountId: request.account.name,
         modelId: request.model,
         modelOptions: this.modelOptions(request),

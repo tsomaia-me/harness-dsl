@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { hookEndpointUrl } from '../hooks.js';
 import { anthropicPricing } from '../pricing/anthropic.js';
@@ -14,17 +14,24 @@ export type ClaudeCliSpawnBridge = CliSpawnBridge;
 
 export interface ClaudeCliDriverOptions {
   readonly oauthToken?: string;
+  /** The configuration directory the CLI signs in at (`CLAUDE_CONFIG_DIR`); absent, the CLI's default. */
+  readonly configDir?: string;
   readonly claudeBinary?: string;
   readonly env?: Record<string, string>;
   readonly spawnBridge?: ClaudeCliSpawnBridge;
 }
 
+function expandHome(filepath: string): string {
+  return filepath.startsWith('~/') ? path.join(homedir(), filepath.slice(2)) : filepath;
+}
+
 /**
  * The Claude CLI as an agent adapter: `claude -p` with stream-json, a JSON schema, sessions and hook
- * settings. A subscription signs in through the CLI's own login or the account's OAuth token, never
- * through an API key the harness process happens to carry: that key would be billed instead.
+ * settings. A subscription signs in through the CLI's login at its configuration directory or the
+ * account's OAuth token, never through an API key the harness process happens to carry: that key
+ * would be billed instead.
  */
-export function claudeCliAdapter(options: { readonly oauthToken?: string } = {}): CliAgentAdapter {
+export function claudeCliAdapter(options: { readonly oauthToken?: string; readonly configDir?: string } = {}): CliAgentAdapter {
   return {
     name: 'claude-cli',
     binary: 'claude',
@@ -40,7 +47,10 @@ export function claudeCliAdapter(options: { readonly oauthToken?: string } = {})
       return args;
     },
     env() {
-      return { ...(options.oauthToken ? { CLAUDE_CODE_OAUTH_TOKEN: options.oauthToken } : {}) };
+      return {
+        ...(options.configDir ? { CLAUDE_CONFIG_DIR: expandHome(options.configDir) } : {}),
+        ...(options.oauthToken ? { CLAUDE_CODE_OAUTH_TOKEN: options.oauthToken } : {}),
+      };
     },
     event(event, state) {
       const usage = event.message?.usage ?? event.usage;
@@ -98,7 +108,7 @@ export function claudeCliAdapter(options: { readonly oauthToken?: string } = {})
 
 export class ClaudeCliDriver extends CliAgentDriver {
   public constructor(options: ClaudeCliDriverOptions = {}) {
-    super(claudeCliAdapter({ ...(options.oauthToken ? { oauthToken: options.oauthToken } : {}) }), {
+    super(claudeCliAdapter({ ...(options.oauthToken ? { oauthToken: options.oauthToken } : {}), ...(options.configDir ? { configDir: options.configDir } : {}) }), {
       ...(options.claudeBinary ? { binary: options.claudeBinary } : {}),
       ...(options.env ? { env: options.env } : {}),
       ...(options.spawnBridge ? { spawnBridge: options.spawnBridge } : {}),

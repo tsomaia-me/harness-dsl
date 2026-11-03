@@ -50,9 +50,12 @@ export const builderRole = H.role('builder')
 
 export function codingHarness(options: CodingHarnessOptions) {
   const quota = sqlite.quota('claude', { path: path.join(options.stateDir, 'quota.sqlite') });
-  const account = claudeCode.subscription('max', { quota });
+  // Three Max subscriptions, each signed in at its own Claude Code configuration directory; a refused one yields to the next.
+  const max1 = claudeCode.subscription('max-1', { configDir: H.env('CLAUDE_CONFIG_DIR_1'), quota });
+  const max2 = claudeCode.subscription('max-2', { configDir: H.env('CLAUDE_CONFIG_DIR_2'), quota });
+  const max3 = claudeCode.subscription('max-3', { configDir: H.env('CLAUDE_CONFIG_DIR_3'), quota });
   const model = claudeCode.model('builder-model', { id: options.model ?? 'claude-haiku-5-5' });
-  const subs = H.pool('subs').accounts(account);
+  const subs = H.pool('subs').accounts(max1, max2, max3);
   const builder = H.seat('builder').role(builderRole).model(model).pool(subs);
   const runner = local.runner('local', { maxConcurrentSlots: 1 });
   const checks = H.command('checks').argv(['node', '--experimental-strip-types', '--test', 'test/sum.test.ts']).runner(runner).effect('repeatable');

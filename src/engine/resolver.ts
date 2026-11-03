@@ -6,7 +6,11 @@ export function processResolver(ports: Readonly<Record<number, number>> = {}, en
     env(ref: EnvRef): string {
       const value = env[ref.name];
       if (value === undefined || value === '') throw new Error(`environment variable "${ref.name}" is not set`);
-      return value;
+      if (ref.index === undefined) return value;
+      const values = value.split(',').map((part) => part.trim());
+      const picked = values[ref.index];
+      if (picked === undefined || picked === '') throw new Error(`environment variable "${ref.name}" holds ${values.length} value(s); there is no value ${ref.index}`);
+      return picked;
     },
     port(ref: PortRef): number {
       const port = ports[ref.slot];
